@@ -1,6 +1,6 @@
 [package]
 name = "biosketch-art-studio"
-version = "3.1.1"
+version = "3.1.2"
 description = "Biosketch.Art Studio — offline scientific illustration editor"
 authors = ["Biosketch.Art"]
 license = "MIT"
