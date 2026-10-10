@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Heatmap Generator - BioSketch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <style>
+    :root {
+      --bs-primary: #2563eb;
+      --bs-primary-light: #eff6ff;
+      --bs-primary-dark: #1d4ed8;
+      --bs-bg: #f4f5f7;
+      --bs-surface: #ffffff;
+      --bs-border: #e2e8f0;
+      --bs-border-light: #f1f5f9;
+      --bs-text: #0f172a;
+      --bs-text-secondary: #475569;
+      --bs-text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bs-bg);
+      color: var(--bs-text);
+      -webkit-font-smoothing: antialiased;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 300px;
+      min-width: 300px;
+      border-right: 1px solid var(--bs-border);
+      background: var(--bs-surface);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--bs-border-light);
+    }
+
+    .sidebar-section h3 {
+      font-size: 9px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--bs-text-muted);
+      margin-bottom: 10px;
+    }
+
+    textarea {
+      width: 100%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 10px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px;
+      outline: none;
+      resize: vertical;
+      min-height: 140px;
+      color: var(--bs-text);
+      background: var(--bs-surface);
+      transition: border-color 0.12s;
+      line-height: 1.5;
+    }
+
+    textarea:focus {
+      border-color: var(--bs-primary);
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.08);
+    }
+
+    .btn {
+      width: 100%;
+      padding: 9px;
+      background: var(--bs-primary);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.12s;
+      margin-top: 8px;
+    }
+
+    .btn:hover { background: var(--bs-primary-dark); }
+
+    .btn-outline {
+      background: var(--bs-surface);
+      color: var(--bs-text-secondary);
+      border: 1px solid var(--bs-border);
+    }
+
+    .btn-outline:hover {
+      background: var(--bs-primary-light);
+      color: var(--bs-primary);
+      border-color: var(--bs-primary);
+    }
+
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      color: var(--bs-text);
+      background: var(--bs-surface);
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.12s;
+    }
+
+    select:focus { border-color: var(--bs-primary); }
+
+    .row-2 { display: flex; gap: 8px; }
+    .row-2 > * { flex: 1; }
+
+    .example-btn {
+      padding: 4px 8px;
+      background: var(--bs-border-light);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      font-size: 10px;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.12s;
+      color: var(--bs-text-secondary);
+    }
+
+    .example-btn:hover {
+      background: var(--bs-primary-light);
+      border-color: var(--bs-primary);
+      color: var(--bs-primary);
+    }
+
+    .examples-row { display: flex; flex-wrap: wrap; gap: 4px; }
+
+    .info-box {
+      padding: 10px;
+      background: var(--bs-primary-light);
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      font-size: 10px;
+      color: #1e40af;
+      line-height: 1.6;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--bs-text-secondary);
+      margin-top: 6px;
+    }
+
+    .checkbox-row input { accent-color: var(--bs-primary); }
+
+    /* ── Chart area ── */
+    .chart-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bs-bg);
+      padding: 16px;
+      overflow: hidden;
+    }
+
+    #heatmap {
+      width: 100%;
+      height: 100%;
+      background: var(--bs-surface);
+      border-radius: 12px;
+      border: 1px solid var(--bs-border);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+    }
+
+    /* Plotly modebar styling */
+    .modebar { right: 12px !important; top: 8px !important; }
+    .modebar-btn { font-size: 14px !important; }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="main">
+    <div class="sidebar">
+      <!-- Data input -->
+      <div class="sidebar-section" style="flex:1;">
+        <h3>Data Input</h3>
+        <p style="font-size:10px; color:var(--bs-text-muted); margin-bottom:8px;">Paste tab or comma-separated data. First row = column labels, first column = row labels.</p>
+        <textarea id="dataInput" placeholder="Gene	Sample1	Sample2	Sample3
+TP53	2.5	-1.2	0.8
+BRCA1	-0.5	3.1	1.4
+MYC	1.8	0.3	-2.1
+EGFR	-1.1	2.4	0.6"></textarea>
+        <button class="btn" onclick="renderHeatmap()">Generate Heatmap</button>
+      </div>
+
+      <!-- Examples -->
+      <div class="sidebar-section">
+        <h3>Examples</h3>
+        <div class="examples-row">
+          <button class="example-btn" onclick="loadExample('gene')">Gene Expression</button>
+          <button class="example-btn" onclick="loadExample('correlation')">Correlation Matrix</button>
+          <button class="example-btn" onclick="loadExample('random')">Random 10x10</button>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div class="sidebar-section">
+        <h3>Color Scale</h3>
+        <select id="colorscale" onchange="renderHeatmap()">
+          <option value="RdBu" selected>Red-Blue (diverging)</option>
+          <option value="Viridis">Viridis</option>
+          <option value="YlOrRd">Yellow-Orange-Red</option>
+          <option value="Blues">Blues</option>
+          <option value="Greens">Greens</option>
+          <option value="Hot">Hot</option>
+          <option value="Portland">Portland</option>
+          <option value="Picnic">Picnic</option>
+          <option value="Greys">Greys</option>
+        </select>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="showValues" onchange="renderHeatmap()">
+          <label for="showValues">Show values in cells</label>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="reverseScale" onchange="renderHeatmap()">
+          <label for="reverseScale">Reverse color scale</label>
+        </div>
+      </div>
+
+      <!-- Export -->
+      <div class="sidebar-section">
+        <h3>Export</h3>
+        <div class="row-2">
+          <button class="btn btn-outline" onclick="exportAs('png')">PNG</button>
+          <button class="btn btn-outline" onclick="exportAs('svg')">SVG</button>
+        </div>
+      </div>
+
+      <!-- Help -->
+      <div class="sidebar-section">
+        <div class="info-box">
+          <strong>Format:</strong> Tab or comma-separated values.<br>
+          Row 1 = column headers. Column 1 = row labels.<br>
+          Plotly toolbar (top-right of chart) has zoom, pan, and additional export options.
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-area">
+      <div id="heatmap"></div>
+    </div>
+  </div>
+
+  <script>
+    var EXAMPLES = {
+      gene: "Gene\tSample_1\tSample_2\tSample_3\tSample_4\tSample_5\tSample_6\nTP53\t2.5\t-1.2\t0.8\t-0.3\t1.7\t-0.9\nBRCA1\t-0.5\t3.1\t1.4\t-2.0\t0.6\t2.3\nMYC\t1.8\t0.3\t-2.1\t1.5\t-1.4\t0.2\nEGFR\t-1.1\t2.4\t0.6\t-0.8\t3.2\t-1.5\nKRAS\t0.9\t-0.7\t2.8\t1.1\t-0.4\t1.9\nPTEN\t-2.3\t1.5\t-0.2\t2.7\t-1.8\t0.4\nRB1\t1.2\t-1.8\t1.6\t-0.5\t2.1\t-0.7\nAPC\t-0.4\t0.8\t-1.9\t3.0\t0.2\t-2.4",
+      correlation: "Variable\tAge\tBMI\tGlucose\tInsulin\tHDL\tLDL\nAge\t1.00\t0.32\t0.45\t0.28\t-0.15\t0.38\nBMI\t0.32\t1.00\t0.52\t0.61\t-0.42\t0.35\nGlucose\t0.45\t0.52\t1.00\t0.73\t-0.31\t0.44\nInsulin\t0.28\t0.61\t0.73\t1.00\t-0.38\t0.29\nHDL\t-0.15\t-0.42\t-0.31\t-0.38\t1.00\t-0.55\nLDL\t0.38\t0.35\t0.44\t0.29\t-0.55\t1.00",
+    };
+
+    function loadExample(name) {
+      if (name === 'random') {
+        var rows = 10, cols = 10;
+        var txt = '\t' + Array.from({length: cols}, function(_, i) { return 'Col_' + (i+1); }).join('\t') + '\n';
+        for (var r = 0; r < rows; r++) {
+          txt += 'Row_' + (r+1);
+          for (var c = 0; c < cols; c++) {
+            txt += '\t' + (Math.random() * 6 - 3).toFixed(2);
+          }
+          txt += '\n';
+        }
+        document.getElementById('dataInput').value = txt.trim();
+      } else {
+        document.getElementById('dataInput').value = EXAMPLES[name] || '';
+      }
+      renderHeatmap();
+    }
+
+    function parseData(text) {
+      var lines = text.trim().split('\n').filter(function(l) { return l.trim(); });
+      if (lines.length < 2) return null;
+
+      var sep = lines[0].includes('\t') ? '\t' : ',';
+      var headers = lines[0].split(sep);
+      var colLabels = headers.slice(1).map(function(h) { return h.trim(); });
+      var rowLabels = [];
+      var z = [];
+
+      for (var i = 1; i < lines.length; i++) {
+        var parts = lines[i].split(sep);
+        rowLabels.push(parts[0].trim());
+        var row = [];
+        for (var j = 1; j < parts.length; j++) {
+          var val = parseFloat(parts[j]);
+          row.push(isNaN(val) ? 0 : val);
+        }
+        z.push(row);
+      }
+
+      return { z: z, x: colLabels, y: rowLabels };
+    }
+
+    function renderHeatmap() {
+      var text = document.getElementById('dataInput').value;
+      if (!text.trim()) return;
+
+      var data = parseData(text);
+      if (!data) return;
+
+      var colorscale = document.getElementById('colorscale').value;
+      var showValues = document.getElementById('showValues').checked;
+      var reverseScale = document.getElementById('reverseScale').checked;
+
+      var trace = {
+        z: data.z,
+        x: data.x,
+        y: data.y,
+        type: 'heatmap',
+        colorscale: colorscale,
+        reversescale: reverseScale,
+        hoverongaps: false,
+        colorbar: {
+          thickness: 16,
+          outlinewidth: 0,
+          tickfont: { family: 'Inter', size: 11, color: '#475569' },
+        },
+      };
+
+      if (showValues) {
+        trace.text = data.z.map(function(row) { return row.map(function(v) { return v.toFixed(2); }); });
+        trace.texttemplate = '%{text}';
+        trace.textfont = { family: 'Inter', size: 10, color: '#0f172a' };
+      }
+
+      var layout = {
+        font: { family: 'Inter', size: 12, color: '#0f172a' },
+        margin: { l: 100, r: 40, t: 30, b: 80 },
+        xaxis: {
+          tickfont: { family: 'Inter', size: 11, color: '#475569' },
+          tickangle: -45,
+          side: 'bottom',
+        },
+        yaxis: {
+          tickfont: { family: 'Inter', size: 11, color: '#475569' },
+          autorange: 'reversed',
+        },
+        paper_bgcolor: '#ffffff',
+        plot_bgcolor: '#ffffff',
+      };
+
+      var config = {
+        responsive: true,
+        displaylogo: false,
+        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+        toImageButtonOptions: { format: 'png', filename: 'heatmap', scale: 3 },
+      };
+
+      Plotly.newPlot('heatmap', [trace], layout, config);
+    }
+
+    function exportAs(format) {
+      var el = document.getElementById('heatmap');
+      Plotly.downloadImage(el, {
+        format: format,
+        filename: 'heatmap',
+        width: 1200,
+        height: 800,
+        scale: 3,
+      });
+    }
+
+    // Load default example
+    loadExample('gene');
+
+    // Listen for parent messages
+    window.addEventListener('message', function(e) {
+      if (e.data && e.data.type === 'load-data') {
+        document.getElementById('dataInput').value = e.data.data;
+        renderHeatmap();
+      }
+      if (e.data && e.data.type === 'get-svg-for-canvas') {
+        var el = document.getElementById('heatmap');
+        Plotly.toImage(el, { format: 'svg', width: 1200, height: 800 }).then(function(url) {
+          fetch(url).then(function(r) { return r.text(); }).then(function(svg) {
+            window.parent.postMessage({ type: 'heatmap-svg-for-canvas', svg: svg }, '*');
+          });
+        });
+      }
+    });
+  </script>
+</body>
+</html>

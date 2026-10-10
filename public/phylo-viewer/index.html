@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phylogenetic Tree Viewer - BioSketch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <style>
+    :root {
+      --bs-primary: #2563eb;
+      --bs-primary-light: #eff6ff;
+      --bs-bg: #f4f5f7;
+      --bs-surface: #ffffff;
+      --bs-border: #e2e8f0;
+      --bs-text: #0f172a;
+      --bs-text-secondary: #475569;
+      --bs-text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bs-bg);
+      color: var(--bs-text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 300px; min-width: 300px;
+      border-right: 1px solid var(--bs-border);
+      background: var(--bs-surface);
+      display: flex; flex-direction: column;
+      overflow-y: auto;
+    }
+    .sidebar-section {
+      padding: 14px 16px;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .sidebar-section h3 {
+      font-size: 9px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--bs-text-muted); margin-bottom: 10px;
+    }
+    /* Collapsible sections */
+    details.sidebar-section { padding: 0; }
+    details.sidebar-section > summary {
+      padding: 12px 16px;
+      font-size: 9px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--bs-text-muted);
+      cursor: pointer; user-select: none;
+      list-style: none; outline: none;
+      display: flex; align-items: center; gap: 6px;
+    }
+    details.sidebar-section > summary::-webkit-details-marker { display: none; }
+    details.sidebar-section > summary::before {
+      content: '▸'; font-size: 8px; transition: transform 0.12s;
+      color: var(--bs-text-muted);
+    }
+    details.sidebar-section[open] > summary::before { transform: rotate(90deg); }
+    details.sidebar-section > summary:hover { color: var(--bs-text); background: rgba(0,0,0,0.02); }
+    details.sidebar-section > .section-body { padding: 0 16px 14px 16px; }
+    textarea {
+      width: 100%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; padding: 10px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px; outline: none;
+      resize: vertical; min-height: 120px;
+      color: var(--bs-text); background: var(--bs-surface);
+      transition: border-color 0.12s; line-height: 1.5;
+    }
+    textarea:focus { border-color: var(--bs-primary); box-shadow: 0 0 0 3px rgba(37,99,235,0.08); }
+    .btn {
+      width: 100%; padding: 9px;
+      background: var(--bs-primary); color: #fff;
+      border: none; border-radius: 8px;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.12s;
+      margin-top: 8px;
+    }
+    .btn:hover { background: #1d4ed8; }
+    .btn-outline {
+      background: var(--bs-surface);
+      color: var(--bs-text-secondary);
+      border: 1px solid var(--bs-border);
+    }
+    .btn-outline:hover {
+      background: var(--bs-primary-light);
+      color: var(--bs-primary);
+      border-color: var(--bs-primary);
+    }
+    select {
+      width: 100%; padding: 8px 10px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px; font-family: 'Inter', sans-serif;
+      font-size: 12px; color: var(--bs-text);
+      background: var(--bs-surface); outline: none;
+      cursor: pointer;
+    }
+    select:focus { border-color: var(--bs-primary); }
+    .row-2 { display: flex; gap: 8px; }
+    .row-2 > * { flex: 1; }
+    .example-btn {
+      padding: 4px 8px;
+      background: #f1f5f9; border: 1px solid transparent;
+      border-radius: 6px; font-size: 10px;
+      font-family: 'Inter', sans-serif; font-weight: 500;
+      cursor: pointer; transition: all 0.12s;
+      color: var(--bs-text-secondary);
+    }
+    .example-btn:hover {
+      background: var(--bs-primary-light);
+      border-color: var(--bs-primary);
+      color: var(--bs-primary);
+    }
+    .examples-row { display: flex; flex-wrap: wrap; gap: 4px; }
+    .checkbox-row {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--bs-text-secondary); margin-top: 6px;
+    }
+    .checkbox-row input { accent-color: var(--bs-primary); }
+    .info-box {
+      padding: 10px; background: var(--bs-primary-light);
+      border: 1px solid #bfdbfe; border-radius: 8px;
+      font-size: 10px; color: #1e40af; line-height: 1.6;
+    }
+
+    /* Chart */
+    .chart-area {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      background: var(--bs-bg); padding: 16px; overflow: hidden;
+    }
+    #tree-container {
+      width: 100%; height: 100%;
+      background: var(--bs-surface);
+      border-radius: 12px;
+      border: 1px solid var(--bs-border);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+      overflow: hidden;
+    }
+    #tree-container svg { width: 100%; height: 100%; }
+
+    /* Tree styles — publication-quality defaults */
+    .tree-link { fill: none; stroke: #1e293b; stroke-width: 1; stroke-linecap: round; stroke-linejoin: round; }
+    .tree-node circle { fill: #fff; stroke: #1e293b; stroke-width: 1.2; }
+    .tree-node.internal circle { display: none; }   /* hidden by default; toggle adds .show-internal */
+    .show-internal .tree-node.internal circle { display: inline; fill: #fff; stroke: #475569; stroke-width: 1; r: 2; }
+    .tree-node text {
+      font-family: 'Inter', sans-serif; font-size: 11px;
+      fill: var(--bs-text); font-weight: 400;
+    }
+    .tree-node text.binomial { font-style: italic; }
+    .tree-node.internal text { fill: var(--bs-text-muted); font-size: 9px; font-weight: 400; }
+    .tree-scale-bar line { stroke: #1e293b; stroke-width: 1.2; }
+    .tree-scale-bar text { font-family: 'JetBrains Mono', monospace; font-size: 10px; fill: #475569; }
+    .support-dot { stroke: #fff; stroke-width: 0.6; pointer-events: none; }
+    .clade-target { cursor: pointer; }
+    .clade-target:hover { stroke-width: 2.5px; }
+    .tree-link.dim, .tree-node.dim text, .tree-node.dim circle { opacity: 0.25; transition: opacity 0.12s; }
+
+    /* Clade color popover */
+    .clade-popover {
+      position: fixed; z-index: 100;
+      background: #fff; border: 1px solid var(--bs-border);
+      border-radius: 8px; padding: 8px;
+      box-shadow: 0 8px 24px rgba(15,23,42,0.18);
+      display: none;
+      font-family: 'Inter', sans-serif;
+    }
+    .clade-popover.open { display: block; }
+    .clade-popover .swatches { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+    .clade-popover .swatch {
+      width: 18px; height: 18px; border-radius: 4px;
+      border: 1px solid rgba(15,23,42,0.1);
+      cursor: pointer; padding: 0;
+    }
+    .clade-popover .swatch:hover { transform: scale(1.1); }
+    .clade-popover .clear-btn {
+      width: 100%; margin-top: 6px; padding: 4px;
+      font-size: 10px; color: var(--bs-text-secondary);
+      background: #f1f5f9; border: 1px solid var(--bs-border);
+      border-radius: 4px; cursor: pointer;
+    }
+    .clade-popover .clear-btn:hover { background: #e2e8f0; }
+    .clade-popover .label { font-size: 10px; color: var(--bs-text-muted); margin-bottom: 5px; }
+
+    /* Trait legend — overlay in chart corner */
+    .trait-legend {
+      position: absolute; top: 24px; right: 24px; z-index: 5;
+      background: rgba(255,255,255,0.95); backdrop-filter: blur(4px);
+      border: 1px solid var(--bs-border); border-radius: 6px;
+      padding: 8px 10px; font-family: 'Inter', sans-serif;
+      box-shadow: 0 2px 8px rgba(15,23,42,0.05);
+      max-width: 200px;
+    }
+    .trait-legend .legend-title {
+      font-size: 9px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--bs-text-muted); margin-bottom: 6px;
+    }
+    .trait-legend .legend-row {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--bs-text); padding: 1px 0;
+    }
+    .trait-legend .legend-swatch {
+      width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0;
+    }
+    .trait-legend .legend-count {
+      margin-left: auto; color: var(--bs-text-muted);
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    }
+    .chart-area { position: relative; }
+
+    /* Find tip overlay */
+    .find-overlay {
+      position: absolute; top: 24px; left: 24px; z-index: 5;
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(255,255,255,0.95); backdrop-filter: blur(4px);
+      border: 1px solid var(--bs-border); border-radius: 6px;
+      padding: 4px 8px;
+      box-shadow: 0 2px 8px rgba(15,23,42,0.05);
+    }
+    .find-overlay input {
+      border: none; outline: none; background: transparent;
+      font-family: 'Inter', sans-serif; font-size: 11px;
+      width: 140px; color: var(--bs-text);
+    }
+    .find-overlay .find-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; color: var(--bs-text-muted);
+    }
+    .find-overlay .find-icon { color: var(--bs-text-muted); font-size: 11px; }
+
+    /* Find highlight */
+    .tree-node.find-hit text { font-weight: 700; }
+    .find-halo { fill: #fef08a; opacity: 0.55; pointer-events: none; }
+    .tree-node.find-miss text, .tree-node.find-miss circle { opacity: 0.18; }
+    .tree-link.find-miss { opacity: 0.18; }
+
+    /* Collapsed clade triangle */
+    .collapsed-triangle { fill: #cbd5e1; stroke: #475569; stroke-width: 1; cursor: pointer; }
+    .collapsed-label { font-family: 'Inter', sans-serif; font-size: 10px; fill: #475569; pointer-events: none; }
+
+    /* Time axis */
+    .time-axis line, .time-axis path { stroke: #1e293b; stroke-width: 1; fill: none; }
+    .time-axis text { font-family: 'JetBrains Mono', monospace; font-size: 9px; fill: #475569; }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="main">
+    <div class="sidebar">
+      <div class="sidebar-section" style="flex:1;">
+        <h3>Newick Input</h3>
+        <p style="font-size:10px; color:var(--bs-text-muted); margin-bottom:8px;">
+          Paste a Newick-format tree string. Branch lengths are optional.
+        </p>
+        <textarea id="newickInput" placeholder="((A:0.1,B:0.2):0.3,(C:0.4,D:0.5):0.6);"></textarea>
+        <button class="btn" onclick="renderTree()">Render Tree</button>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Examples</h3>
+        <div class="examples-row">
+          <button class="example-btn" onclick="loadExample('primates')">Primates</button>
+          <button class="example-btn" onclick="loadExample('mammals')">Mammals</button>
+          <button class="example-btn" onclick="loadExample('virus')">SARS-CoV-2</button>
+          <button class="example-btn" onclick="loadExample('gene')">Gene Family</button>
+          <button class="example-btn" onclick="loadExample('simple')">Simple</button>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Layout</h3>
+        <select id="layout" onchange="renderTree()">
+          <option value="rectangular" selected>Rectangular (Cladogram)</option>
+          <option value="radial">Radial (Circular)</option>
+        </select>
+        <div class="checkbox-row">
+          <input type="checkbox" id="showLengths" onchange="renderTree()">
+          <label for="showLengths">Scale by branch length</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="timeAxis" onchange="renderTree()">
+          <label for="timeAxis">Treat lengths as time (Mya)</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="italicizeBinomials" checked onchange="renderTree()">
+          <label for="italicizeBinomials">Italicize species names</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="alignTips" onchange="renderTree()">
+          <label for="alignTips">Align tip labels (with leaders)</label>
+        </div>
+      </div>
+
+      <details class="sidebar-section">
+        <summary>Annotations</summary>
+        <div class="section-body">
+          <div class="checkbox-row" style="margin-top:0;">
+            <input type="checkbox" id="showBootstrap" onchange="renderTree()">
+            <label for="showBootstrap">Show internal labels</label>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="showInternalNodes" onchange="renderTree()">
+            <label for="showInternalNodes">Show internal node dots</label>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="showSupport" onchange="renderTree()">
+            <label for="showSupport">Show support values</label>
+          </div>
+        </div>
+      </details>
+
+      <details class="sidebar-section">
+        <summary>Clade Colors</summary>
+        <div class="section-body">
+          <p style="font-size:10px; color:var(--bs-text-muted); margin-bottom:6px;">
+            Click any internal node or branch in the tree to color the clade.
+          </p>
+          <button class="example-btn" style="width:100%;" onclick="clearAllCladeColors()">Clear all colors</button>
+        </div>
+      </details>
+
+      <details class="sidebar-section">
+        <summary>Trait Coloring</summary>
+        <div class="section-body">
+          <p style="font-size:10px; color:var(--bs-text-muted); margin-bottom:6px;">
+            Paste tip annotations as <code>name &lt;tab&gt; category</code>, one per line. Comma also works.
+          </p>
+          <textarea id="traitInput" style="min-height:80px; font-size:10px;" placeholder="Homo sapiens&#9;Hominidae&#10;Pan troglodytes&#9;Hominidae&#10;Mus musculus&#9;Rodentia"></textarea>
+          <div class="row-2">
+            <button class="btn" onclick="applyTraits()">Apply</button>
+            <button class="btn btn-outline" onclick="clearTraits()">Clear</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="sidebar-section">
+        <h3>Export</h3>
+        <div class="row-2">
+          <button class="btn btn-outline" onclick="exportAs('svg')">SVG</button>
+          <button class="btn btn-outline" onclick="exportAs('png')">PNG</button>
+        </div>
+      </div>
+
+      <details class="sidebar-section">
+        <summary>Newick format help</summary>
+        <div class="section-body">
+          <div class="info-box">
+            Nested parentheses define clades.<br>
+            <code>((A:0.1,B:0.2):0.3,C:0.4);</code><br>
+            Colons denote branch lengths. Numeric internal-node names are read as bootstrap or posterior support values.
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="chart-area">
+      <div class="find-overlay">
+        <span class="find-icon">⌕</span>
+        <input id="findInput" type="text" placeholder="Find tip..." oninput="onFindInput()">
+        <span id="findCount" class="find-count"></span>
+      </div>
+      <div id="tree-container"></div>
+    </div>
+  </div>
+
+  <div id="cladePopover" class="clade-popover">
+    <div class="label">Color clade</div>
+    <div class="swatches">
+      <button class="swatch" style="background:#ef4444" data-color="#ef4444"></button>
+      <button class="swatch" style="background:#f97316" data-color="#f97316"></button>
+      <button class="swatch" style="background:#eab308" data-color="#eab308"></button>
+      <button class="swatch" style="background:#22c55e" data-color="#22c55e"></button>
+      <button class="swatch" style="background:#06b6d4" data-color="#06b6d4"></button>
+      <button class="swatch" style="background:#3b82f6" data-color="#3b82f6"></button>
+      <button class="swatch" style="background:#a855f7" data-color="#a855f7"></button>
+    </div>
+    <button class="clear-btn" data-color="">Reset clade color</button>
+    <div style="display:flex; gap:4px; margin-top:6px;">
+      <button class="clear-btn" id="collapseBtn" style="margin-top:0;">Collapse</button>
+      <button class="clear-btn" id="newickBtn" style="margin-top:0;">Copy Newick</button>
+    </div>
+  </div>
+
+  <script>
+    var EXAMPLES = {
+      primates: "((((Homo_sapiens:6.4,Pan_troglodytes:6.4):2.6,Gorilla_gorilla:9.0):7.0,Pongo_pygmaeus:16.0):12.0,(Macaca_mulatta:22.0,(Papio_anubis:18.0,Cercopithecus_mitis:18.0):4.0):6.0);",
+      mammals: "((((Homo_sapiens:85,Pan_troglodytes:85):10,Macaca_mulatta:95):10,(Mus_musculus:80,Rattus_norvegicus:80):25):15,((Bos_taurus:90,Sus_scrofa:90):10,(Canis_lupus:85,Felis_catus:85):15):20);",
+      virus: "((Wuhan_original:0.002,((Alpha_B117:0.004,Beta_B1351:0.005):0.002,Gamma_P1:0.005):0.003):0.008,((Delta_B16172:0.006,Delta_plus_AY1:0.007):0.003,((Omicron_BA1:0.010,Omicron_BA2:0.011):0.002,(Omicron_BA4:0.012,Omicron_BA5:0.013):0.002):0.004):0.005);",
+      gene: "((Human_TP53:0.05,(Mouse_Trp53:0.08,Rat_Tp53:0.07):0.04):0.12,((Human_TP63:0.06,Mouse_Trp63:0.09):0.10,(Human_TP73:0.07,Zebrafish_tp73:0.15):0.08):0.05);",
+      simple: "((A:1,B:1):0.5,(C:1.5,(D:0.5,E:0.5):1):0.5);"
+    };
+
+    function loadExample(name) {
+      document.getElementById('newickInput').value = EXAMPLES[name] || '';
+      renderTree();
+    }
+
+    // ── Newick Parser ──
+    function parseNewick(str) {
+      str = str.trim().replace(/;$/, '').trim();
+      var i = 0;
+
+      function readNode() {
+        var node = { children: [], name: '', length: 0 };
+        if (str[i] === '(') {
+          i++; // skip '('
+          node.children.push(readNode());
+          while (str[i] === ',') {
+            i++; // skip ','
+            node.children.push(readNode());
+          }
+          i++; // skip ')'
+        }
+        // Read name
+        var name = '';
+        while (i < str.length && str[i] !== ':' && str[i] !== ',' && str[i] !== ')' && str[i] !== ';') {
+          name += str[i++];
+        }
+        node.name = name.trim().replace(/_/g, ' ');
+        // Read length
+        if (str[i] === ':') {
+          i++; // skip ':'
+          var len = '';
+          while (i < str.length && str[i] !== ',' && str[i] !== ')' && str[i] !== ';') {
+            len += str[i++];
+          }
+          node.length = parseFloat(len) || 0;
+        }
+        return node;
+      }
+
+      return readNode();
+    }
+
+    // ── Tier 2 state ──
+    var cladeColors = {}; // key: clade signature → hex color
+    var activeNodeForColor = null; // d3 node currently being colored
+
+    function clearAllCladeColors() { cladeColors = {}; renderTree(); }
+
+    // ── Tier 4 state ──
+    var collapsedClades = new Set(); // signatures of collapsed subtrees
+    var findQuery = '';
+
+    function isCollapsed(d3node) { return collapsedClades.has(cladeSignature(d3node)); }
+    function isUnderCollapsed(d3node) {
+      var n = d3node.parent;
+      while (n) {
+        if (collapsedClades.has(cladeSignature(n))) return true;
+        n = n.parent;
+      }
+      return false;
+    }
+
+    // Serialize a parsed-Newick subtree (the raw object from parseNewick, not d3 node).
+    function serializeNewick(node) {
+      var s = '';
+      if (node.children && node.children.length) {
+        s += '(' + node.children.map(serializeNewick).join(',') + ')';
+      }
+      var name = (node.name || '').replace(/ /g, '_');
+      if (typeof node.support === 'number') name = String(node.support);
+      s += name;
+      if (node.length) s += ':' + node.length;
+      return s;
+    }
+
+    // Find input handler — debounced via short timeout
+    var findDebounce = null;
+    function onFindInput() {
+      clearTimeout(findDebounce);
+      findDebounce = setTimeout(function() {
+        findQuery = document.getElementById('findInput').value.trim().toLowerCase();
+        applyFindHighlight();
+      }, 120);
+    }
+
+    function applyFindHighlight() {
+      var container = document.getElementById('tree-container');
+      var svg = container.querySelector('svg');
+      if (!svg) return;
+      // Remove old halos
+      svg.querySelectorAll('.find-halo').forEach(function(el) { el.remove(); });
+      var leaves = svg.querySelectorAll('.tree-node:not(.internal)');
+      var allNodes = svg.querySelectorAll('.tree-node');
+      var allLinks = svg.querySelectorAll('.tree-link');
+      if (!findQuery) {
+        allNodes.forEach(function(n) { n.classList.remove('find-miss', 'find-hit'); });
+        allLinks.forEach(function(L) { L.classList.remove('find-miss'); });
+        document.getElementById('findCount').textContent = '';
+        return;
+      }
+      var matchCount = 0;
+      var matchedTipNames = new Set();
+      leaves.forEach(function(n) {
+        var name = (n.querySelector('text') && n.querySelector('text').textContent || '').toLowerCase();
+        if (name.indexOf(findQuery) !== -1) {
+          n.classList.add('find-hit');
+          n.classList.remove('find-miss');
+          matchCount++;
+          matchedTipNames.add(name);
+          // Add halo behind tip dot
+          var c = n.querySelector('circle');
+          if (c) {
+            var halo = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            halo.setAttribute('class', 'find-halo');
+            halo.setAttribute('cx', c.getAttribute('cx') || 0);
+            halo.setAttribute('cy', c.getAttribute('cy') || 0);
+            halo.setAttribute('r', 9);
+            n.insertBefore(halo, c);
+          }
+        } else {
+          n.classList.add('find-miss');
+          n.classList.remove('find-hit');
+        }
+      });
+      // Internal nodes & links also dim if no descendant matched
+      svg.querySelectorAll('.tree-node.internal').forEach(function(n) { n.classList.add('find-miss'); });
+      allLinks.forEach(function(L) { L.classList.add('find-miss'); });
+      document.getElementById('findCount').textContent = matchCount + (matchCount === 1 ? ' match' : ' matches');
+    }
+
+    // Time axis renderer (rectangular only, when timeAxis is on)
+    function renderTimeAxis(svg, root, width, height, margin) {
+      var maxD = getMaxDepth(root);
+      if (!maxD || maxD <= 0) return;
+      var innerW = width - margin.left - margin.right;
+      var pxPerUnit = innerW / maxD;
+      // Choose nice tick interval
+      var target = 80 / pxPerUnit; // ~80px per tick
+      var pow10 = Math.pow(10, Math.floor(Math.log10(target)));
+      var f = target / pow10;
+      var nice = f >= 5 ? 5 : f >= 2 ? 2 : 1;
+      var step = nice * pow10;
+      var ax = svg.append('g')
+        .attr('class', 'time-axis')
+        .attr('transform', 'translate(' + margin.left + ',' + (height - 22) + ')');
+      ax.append('line').attr('x1', 0).attr('x2', innerW).attr('y1', 0).attr('y2', 0);
+      // Ticks at 0, step, 2*step, ... up to maxD (these are Mya from present)
+      for (var t = 0; t <= maxD + step / 2; t += step) {
+        // x position: tip (Mya=0) is on the right (x=innerW); root (Mya=maxD) is on the left (x=0)
+        var x = innerW - t * pxPerUnit;
+        if (x < -1 || x > innerW + 1) continue;
+        ax.append('line').attr('x1', x).attr('x2', x).attr('y1', 0).attr('y2', 4);
+        ax.append('text').attr('x', x).attr('y', 14).attr('text-anchor', 'middle').text(t);
+      }
+      ax.append('text')
+        .attr('x', innerW).attr('y', -4)
+        .attr('text-anchor', 'end')
+        .style('font-size', '9px').style('fill', '#94a3b8')
+        .text('Mya →');
+    }
+
+    // Wire collapse + copy-newick buttons
+    document.getElementById('collapseBtn').addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (!activeNodeForColor) return;
+      var sig = cladeSignature(activeNodeForColor);
+      if (collapsedClades.has(sig)) collapsedClades.delete(sig);
+      else collapsedClades.add(sig);
+      hideCladePopover();
+      renderTree();
+    });
+    document.getElementById('newickBtn').addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (!activeNodeForColor) return;
+      var nwk = serializeNewick(activeNodeForColor.data) + ';';
+      if (navigator.clipboard) navigator.clipboard.writeText(nwk).catch(function() {});
+      // Visual confirm
+      var btn = e.target;
+      var orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(function() { btn.textContent = orig; }, 1100);
+    });
+
+    // ── Trait coloring ──
+    var tipTraits = {};   // tipName → category
+    var traitColors = {}; // category → hex color
+    // Wong colorblind-safe + extras for >8 categories
+    var TRAIT_PALETTE = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7', '#999999', '#a855f7', '#ef4444', '#06b6d4', '#22c55e'];
+
+    function applyTraits() {
+      var raw = document.getElementById('traitInput').value.trim();
+      if (!raw) { tipTraits = {}; traitColors = {}; renderTree(); return; }
+      var lines = raw.split(/\r?\n/);
+      tipTraits = {};
+      var seen = [];
+      lines.forEach(function(line) {
+        var parts = line.split(/\t|,/);
+        if (parts.length < 2) return;
+        var name = parts[0].trim().replace(/_/g, ' ');
+        var cat = parts.slice(1).join(',').trim();
+        if (!name || !cat) return;
+        tipTraits[name] = cat;
+        if (seen.indexOf(cat) === -1) seen.push(cat);
+      });
+      traitColors = {};
+      seen.forEach(function(cat, i) { traitColors[cat] = TRAIT_PALETTE[i % TRAIT_PALETTE.length]; });
+      renderTree();
+    }
+    function clearTraits() {
+      document.getElementById('traitInput').value = '';
+      tipTraits = {}; traitColors = {};
+      renderTree();
+    }
+    function tipTraitColor(d3node) {
+      var t = tipTraits[d3node.data.name];
+      return t ? traitColors[t] : null;
+    }
+    function renderTraitLegend(container, root) {
+      var existing = container.parentNode.querySelector('.trait-legend');
+      if (existing) existing.remove();
+      if (Object.keys(traitColors).length === 0) return;
+      // Count tips per category for the actual rendered tree
+      var counts = {};
+      root.leaves().forEach(function(l) {
+        var t = tipTraits[l.data.name];
+        if (t) counts[t] = (counts[t] || 0) + 1;
+      });
+      if (Object.keys(counts).length === 0) return;
+      var box = document.createElement('div');
+      box.className = 'trait-legend';
+      var html = '<div class="legend-title">Traits</div>';
+      Object.keys(traitColors).forEach(function(cat) {
+        if (!counts[cat]) return;
+        html += '<div class="legend-row">'
+          + '<span class="legend-swatch" style="background:' + traitColors[cat] + '"></span>'
+          + '<span>' + cat + '</span>'
+          + '<span class="legend-count">' + counts[cat] + '</span>'
+          + '</div>';
+      });
+      box.innerHTML = html;
+      container.parentNode.appendChild(box);
+    }
+
+    // A stable clade signature: sorted leaf names of the subtree.
+    function cladeSignature(d3node) {
+      var leaves = d3node.leaves().map(function(l) { return l.data.name; }).sort();
+      return leaves.join('|');
+    }
+
+    // Walk up ancestors; return the first ancestor with a color, else null.
+    function inheritedColor(d3node) {
+      var n = d3node;
+      while (n) {
+        var sig = cladeSignature(n);
+        if (cladeColors[sig]) return cladeColors[sig];
+        n = n.parent;
+      }
+      return null;
+    }
+
+    // Detect numeric internal-node names as support values; mutate parsed tree.
+    // Returns {min, max, isPercent} or null if no support found.
+    function detectSupport(parsed) {
+      var values = [];
+      function walk(n) {
+        if (n.children && n.children.length) {
+          var v = parseFloat(n.name);
+          if (!isNaN(v) && isFinite(v) && /^[0-9]*\.?[0-9]+$/.test((n.name || '').trim())) {
+            n.support = v;
+            n.name = '';
+            values.push(v);
+          }
+          n.children.forEach(walk);
+        }
+      }
+      walk(parsed);
+      if (values.length === 0) return null;
+      var max = Math.max.apply(null, values);
+      var min = Math.min.apply(null, values);
+      return { min: min, max: max, isPercent: max > 1 };
+    }
+
+    function supportColor(v, range) {
+      // Normalize to 0-1
+      var norm = range.isPercent ? v / 100 : v;
+      // Pale slate at low → dark slate at high
+      var t = Math.max(0, Math.min(1, norm));
+      var r = Math.round(148 + (15 - 148) * t);
+      var gv = Math.round(163 + (23 - 163) * t);
+      var b = Math.round(184 + (42 - 184) * t);
+      return 'rgb(' + r + ',' + gv + ',' + b + ')';
+    }
+
+    // Popover positioning + click handlers (set up once at load)
+    function showCladePopover(d3node, screenX, screenY) {
+      activeNodeForColor = d3node;
+      var pop = document.getElementById('cladePopover');
+      pop.style.left = (screenX + 6) + 'px';
+      pop.style.top = (screenY + 6) + 'px';
+      pop.classList.add('open');
+    }
+    function hideCladePopover() {
+      var pop = document.getElementById('cladePopover');
+      pop.classList.remove('open');
+      activeNodeForColor = null;
+    }
+    document.addEventListener('click', function(e) {
+      var pop = document.getElementById('cladePopover');
+      if (!pop || !pop.classList.contains('open')) return;
+      var inside = pop.contains(e.target);
+      var onTarget = e.target.closest && e.target.closest('.clade-target');
+      if (!inside && !onTarget) hideCladePopover();
+    });
+    document.getElementById('cladePopover').addEventListener('click', function(e) {
+      var btn = e.target.closest('.swatch, .clear-btn');
+      if (!btn || !activeNodeForColor) return;
+      var color = btn.getAttribute('data-color') || '';
+      var sig = cladeSignature(activeNodeForColor);
+      if (color) cladeColors[sig] = color;
+      else delete cladeColors[sig];
+      hideCladePopover();
+      renderTree();
+    });
+
+    // ── Tree Renderer ──
+    function renderTree() {
+      var text = document.getElementById('newickInput').value.trim();
+      if (!text) return;
+
+      var container = document.getElementById('tree-container');
+      container.innerHTML = '';
+
+      var layout = document.getElementById('layout').value;
+      var scaleLengths = document.getElementById('showLengths').checked;
+      var showInternal = document.getElementById('showBootstrap').checked;
+      var showInternalNodes = document.getElementById('showInternalNodes').checked;
+      var alignTips = document.getElementById('alignTips').checked;
+      var italicize = document.getElementById('italicizeBinomials').checked;
+      var showSupport = document.getElementById('showSupport').checked;
+      var timeAxis = document.getElementById('timeAxis').checked;
+      container.classList.toggle('show-internal', showInternalNodes);
+
+      var parsed;
+      try { parsed = parseNewick(text); }
+      catch(e) { container.innerHTML = '<p style="padding:40px;color:#94a3b8;text-align:center;">Invalid Newick format</p>'; return; }
+      var supportRange = detectSupport(parsed);
+
+      var rect = container.getBoundingClientRect();
+      var width = rect.width || 800;
+      var height = rect.height || 600;
+      var margin = { top: 30, right: 180, bottom: 30, left: 30 };
+
+      if (layout === 'radial') {
+        margin = { top: 40, right: 40, bottom: 40, left: 40 };
+      }
+
+      var svg = d3.select(container).append('svg')
+        .attr('width', width).attr('height', height)
+        .attr('xmlns', 'http://www.w3.org/2000/svg');
+
+      var g = svg.append('g');
+
+      var root = d3.hierarchy(parsed, function(d) { return d.children && d.children.length ? d.children : null; });
+
+      // Count leaves for sizing
+      var leafCount = root.leaves().length;
+
+      if (layout === 'radial') {
+        renderRadial(g, root, width, height, margin, scaleLengths, showInternal, leafCount, italicize, showSupport, supportRange);
+      } else {
+        renderRectangular(g, root, width, height, margin, scaleLengths, showInternal, alignTips, leafCount, italicize, showSupport, supportRange);
+        if (scaleLengths) {
+          if (timeAxis) renderTimeAxis(svg, root, width, height, margin);
+          else renderScaleBar(svg, root, width, height, margin);
+        }
+      }
+      renderTraitLegend(container, root);
+      applyFindHighlight();
+
+      // Zoom
+      var zoom = d3.zoom().scaleExtent([0.3, 5]).on('zoom', function(event) {
+        g.attr('transform', event.transform);
+      });
+      svg.call(zoom);
+    }
+
+    function getMaxDepth(node) {
+      if (!node.children) return node.data.length || 0;
+      return (node.data.length || 0) + d3.max(node.children, getMaxDepth);
+    }
+
+    function isBinomial(name) {
+      return /^[A-Z][a-z]+ [a-z]/.test(name || '');
+    }
+
+    function attachHoverHighlight(g, root) {
+      function handle(d, on) {
+        var descSet = new Set(d.descendants());
+        g.selectAll('.tree-link').classed('dim', function(L) { return on && !descSet.has(L.target); });
+        g.selectAll('.tree-node').classed('dim', function(N) { return on && !descSet.has(N); });
+      }
+      g.selectAll('.tree-node').on('mouseenter', function(e, d) { handle(d, true); }).on('mouseleave', function(e, d) { handle(d, false); });
+      g.selectAll('.tree-link').on('mouseenter', function(e, d) { handle(d.target, true); }).on('mouseleave', function(e, d) { handle(d.target, false); });
+    }
+
+    function renderRectangular(g, root, width, height, margin, scaleLengths, showInternal, alignTips, leafCount, italicize, showSupport, supportRange) {
+      var innerW = width - margin.left - margin.right;
+      var innerH = height - margin.top - margin.bottom;
+
+      g.attr('transform', 'translate(' + margin.left + ',' + margin.top + ')');
+
+      // Assign y positions (vertical spacing for leaves)
+      var leafIndex = 0;
+      root.eachBefore(function(d) {
+        if (!d.children) { d.leafIndex = leafIndex++; }
+      });
+
+      // Assign y: leaves get even spacing, internal nodes get midpoint of children
+      root.eachAfter(function(d) {
+        if (!d.children) {
+          d.y = (d.leafIndex / (leafCount - 1 || 1)) * innerH;
+        } else {
+          d.y = d3.mean(d.children, function(c) { return c.y; });
+        }
+      });
+
+      // Assign x (horizontal) based on depth or branch length
+      if (scaleLengths) {
+        var maxD = getMaxDepth(root);
+        var xScale = maxD > 0 ? innerW / maxD : innerW;
+
+        function assignX(node, cumulative) {
+          node.x = cumulative * xScale;
+          if (node.children) {
+            node.children.forEach(function(c) {
+              assignX(c, cumulative + (c.data.length || 0));
+            });
+          }
+        }
+        assignX(root, 0);
+      } else {
+        // Equal spacing by depth
+        var maxDepth = root.height;
+        root.each(function(d) {
+          d.x = (d.depth / (maxDepth || 1)) * innerW;
+        });
+      }
+
+      // Filter links/nodes under collapsed clades
+      var visibleLinks = root.links().filter(function(L) {
+        return !isUnderCollapsed(L.target);
+      });
+      var visibleNodes = root.descendants().filter(function(d) { return !isUnderCollapsed(d); });
+
+      // Draw links — rounded-corner elbows, clade- + trait-coloured
+      g.selectAll('.tree-link')
+        .data(visibleLinks)
+        .enter().append('path')
+        .attr('class', 'tree-link clade-target')
+        .attr('stroke', function(d) {
+          if (!d.target.children) {
+            var t = tipTraitColor(d.target);
+            if (t) return t;
+          }
+          return inheritedColor(d.target) || '#1e293b';
+        })
+        .attr('d', function(d) {
+          var sx = d.source.x, sy = d.source.y, tx = d.target.x, ty = d.target.y;
+          if (Math.abs(sx - tx) < 0.5 || Math.abs(sy - ty) < 0.5) {
+            return 'M' + sx + ',' + sy + 'L' + tx + ',' + ty;
+          }
+          var r = Math.min(6, Math.abs(tx - sx) * 0.4, Math.abs(ty - sy) * 0.4);
+          var vDir = ty > sy ? 1 : -1;
+          var hDir = tx > sx ? 1 : -1;
+          return 'M' + sx + ',' + sy
+            + 'V' + (ty - vDir * r)
+            + 'Q' + sx + ',' + ty + ' ' + (sx + hDir * r) + ',' + ty
+            + 'L' + tx + ',' + ty;
+        })
+        .on('click', function(event, d) {
+          event.stopPropagation();
+          showCladePopover(d.target, event.clientX, event.clientY);
+        });
+
+      // Tip leader lines (only when explicitly requested)
+      if (alignTips) {
+        g.selectAll('.align-line')
+          .data(root.leaves())
+          .enter().append('line')
+          .attr('x1', function(d) { return d.x; })
+          .attr('y1', function(d) { return d.y; })
+          .attr('x2', innerW)
+          .attr('y2', function(d) { return d.y; })
+          .attr('stroke', '#f1f5f9')
+          .attr('stroke-width', 1);
+      }
+
+      // Draw nodes
+      var node = g.selectAll('.tree-node')
+        .data(visibleNodes)
+        .enter().append('g')
+        .attr('class', function(d) { return 'tree-node' + (d.children ? ' internal' : ''); })
+        .attr('transform', function(d) { return 'translate(' + d.x + ',' + d.y + ')'; });
+
+      // Draw collapsed-clade triangles (one per collapsed root) — appended before labels so labels overlay
+      var collapsedRoots = visibleNodes.filter(function(d) { return d.children && isCollapsed(d); });
+      collapsedRoots.forEach(function(d) {
+        var leaves = d.leaves();
+        var maxX = d3.max(leaves, function(l) { return l.x; });
+        var minY = d3.min(leaves, function(l) { return l.y; });
+        var maxY = d3.max(leaves, function(l) { return l.y; });
+        var pts = d.x + ',' + d.y + ' ' + maxX + ',' + minY + ' ' + maxX + ',' + maxY;
+        g.append('polygon')
+          .attr('class', 'collapsed-triangle')
+          .attr('points', pts)
+          .on('click', function(event) {
+            event.stopPropagation();
+            showCladePopover(d, event.clientX, event.clientY);
+          });
+        g.append('text')
+          .attr('class', 'collapsed-label')
+          .attr('x', maxX + 6).attr('y', d.y).attr('dy', '0.35em')
+          .text((leaves.length) + ' tips');
+      });
+
+      node.append('circle')
+        .attr('r', function(d) { return d.children ? 3 : 4.5; })
+        .attr('class', function(d) { return d.children ? 'clade-target' : null; })
+        .attr('stroke', function(d) {
+          var t = !d.children ? tipTraitColor(d) : null;
+          return t || inheritedColor(d) || (d.children ? '#475569' : '#1e293b');
+        })
+        .attr('fill', function(d) {
+          if (!d.children) {
+            var t = tipTraitColor(d);
+            if (t) return t;
+            var c = inheritedColor(d);
+            if (c) return c;
+          }
+          return '#fff';
+        })
+        .on('click', function(event, d) {
+          if (!d.children) return;
+          event.stopPropagation();
+          showCladePopover(d, event.clientX, event.clientY);
+        });
+
+      // Support value circles (rendered atop internal nodes)
+      if (showSupport && supportRange) {
+        node.filter(function(d) { return d.children && typeof d.data.support === 'number'; })
+          .append('circle')
+          .attr('class', 'support-dot')
+          .attr('r', function(d) {
+            var norm = supportRange.isPercent ? d.data.support / 100 : d.data.support;
+            return 2 + Math.max(0, Math.min(1, norm)) * 4;
+          })
+          .attr('fill', function(d) { return supportColor(d.data.support, supportRange); });
+      }
+
+      // Leaf labels — recoloured by trait > clade > default
+      node.filter(function(d) { return !d.children; })
+        .append('text')
+        .attr('class', function(d) { return italicize && isBinomial(d.data.name) ? 'binomial' : null; })
+        .attr('x', alignTips ? function(d) { return innerW - d.x + 8; } : 8)
+        .attr('dy', '0.35em')
+        .attr('fill', function(d) { return tipTraitColor(d) || inheritedColor(d) || '#0f172a'; })
+        .text(function(d) { return d.data.name; });
+
+      // Internal labels
+      if (showInternal) {
+        node.filter(function(d) { return d.children && d.data.name; })
+          .append('text')
+          .attr('x', -6).attr('dy', -8)
+          .attr('text-anchor', 'end')
+          .text(function(d) { return d.data.name; });
+      }
+
+      attachHoverHighlight(g, root);
+    }
+
+    function renderScaleBar(svg, root, width, height, margin) {
+      // Determine the on-screen pixels-per-unit by inspecting two leaves' x distances
+      var maxD = getMaxDepth(root);
+      if (!maxD || maxD <= 0) return;
+      var innerW = width - margin.left - margin.right;
+      var pxPerUnit = innerW / maxD;
+      // Choose a "nice" scale value: aim for ~80px wide, snap to 1, 2, 5, 10 series
+      var target = 80 / pxPerUnit;
+      var pow10 = Math.pow(10, Math.floor(Math.log10(target)));
+      var f = target / pow10;
+      var nice = f >= 5 ? 5 : f >= 2 ? 2 : 1;
+      var unit = nice * pow10;
+      var barPx = unit * pxPerUnit;
+      var label = unit < 1 ? unit.toPrecision(1) : String(unit);
+
+      var sb = svg.append('g')
+        .attr('class', 'tree-scale-bar')
+        .attr('transform', 'translate(' + margin.left + ',' + (height - 14) + ')');
+      sb.append('line').attr('x1', 0).attr('x2', barPx).attr('y1', 0).attr('y2', 0);
+      sb.append('line').attr('x1', 0).attr('x2', 0).attr('y1', -3).attr('y2', 3);
+      sb.append('line').attr('x1', barPx).attr('x2', barPx).attr('y1', -3).attr('y2', 3);
+      sb.append('text').attr('x', barPx / 2).attr('y', 14).attr('text-anchor', 'middle').text(label);
+    }
+
+    function renderRadial(g, root, width, height, margin, scaleLengths, showInternal, leafCount, italicize, showSupport, supportRange) {
+      var cx = width / 2, cy = height / 2;
+      var radius = Math.min(cx, cy) - 80;
+
+      g.attr('transform', 'translate(' + cx + ',' + cy + ')');
+
+      // Assign angles to leaves
+      var leafIndex = 0;
+      root.eachBefore(function(d) {
+        if (!d.children) d.leafIndex = leafIndex++;
+      });
+
+      root.eachAfter(function(d) {
+        if (!d.children) {
+          d.angle = (d.leafIndex / leafCount) * 2 * Math.PI - Math.PI / 2;
+        } else {
+          d.angle = d3.mean(d.children, function(c) { return c.angle; });
+        }
+      });
+
+      // Assign radius
+      if (scaleLengths) {
+        var maxD = getMaxDepth(root);
+        var rScale = maxD > 0 ? radius / maxD : radius;
+        function assignR(node, cum) {
+          node.r = cum * rScale;
+          if (node.children) {
+            node.children.forEach(function(c) { assignR(c, cum + (c.data.length || 0)); });
+          }
+        }
+        assignR(root, 0);
+      } else {
+        var maxDepth = root.height;
+        root.each(function(d) { d.r = (d.depth / (maxDepth || 1)) * radius; });
+      }
+
+      // Convert to x,y
+      root.each(function(d) {
+        d.px = d.r * Math.cos(d.angle);
+        d.py = d.r * Math.sin(d.angle);
+      });
+
+      var visibleLinksR = root.links().filter(function(L) { return !isUnderCollapsed(L.target); });
+      var visibleNodesR = root.descendants().filter(function(d) { return !isUnderCollapsed(d); });
+
+      // Draw links — clade- + trait-coloured + clickable
+      g.selectAll('.tree-link')
+        .data(visibleLinksR)
+        .enter().append('path')
+        .attr('class', 'tree-link clade-target')
+        .attr('stroke', function(d) {
+          if (!d.target.children) {
+            var t = tipTraitColor(d.target);
+            if (t) return t;
+          }
+          return inheritedColor(d.target) || '#1e293b';
+        })
+        .attr('d', function(d) {
+          var sA = d.source.angle, tA = d.target.angle;
+          var sR = d.source.r, tR = d.target.r;
+          var midX = sR * Math.cos(tA), midY = sR * Math.sin(tA);
+          var largeArc = Math.abs(tA - sA) > Math.PI ? 1 : 0;
+          var sweep = tA > sA ? 1 : 0;
+          return 'M' + d.source.px + ',' + d.source.py
+            + 'A' + sR + ',' + sR + ' 0 ' + largeArc + ' ' + sweep + ' ' + midX + ',' + midY
+            + 'L' + d.target.px + ',' + d.target.py;
+        })
+        .on('click', function(event, d) {
+          event.stopPropagation();
+          showCladePopover(d.target, event.clientX, event.clientY);
+        });
+
+      // Draw nodes
+      var node = g.selectAll('.tree-node')
+        .data(visibleNodesR)
+        .enter().append('g')
+        .attr('class', function(d) { return 'tree-node' + (d.children ? ' internal' : ''); })
+        .attr('transform', function(d) { return 'translate(' + d.px + ',' + d.py + ')'; });
+
+      // Collapsed-clade labels (radial — just a small "(N tips)" off the collapsed node)
+      visibleNodesR.filter(function(d) { return d.children && isCollapsed(d); }).forEach(function(d) {
+        g.append('circle').attr('cx', d.px).attr('cy', d.py).attr('r', 6).attr('class', 'collapsed-triangle');
+        g.append('text').attr('class', 'collapsed-label')
+          .attr('x', d.px + 8).attr('y', d.py).attr('dy', '0.35em')
+          .text(d.leaves().length + ' tips');
+      });
+
+      node.append('circle')
+        .attr('r', function(d) { return d.children ? 3 : 4.5; })
+        .attr('class', function(d) { return d.children ? 'clade-target' : null; })
+        .attr('stroke', function(d) {
+          var t = !d.children ? tipTraitColor(d) : null;
+          return t || inheritedColor(d) || (d.children ? '#475569' : '#1e293b');
+        })
+        .attr('fill', function(d) {
+          if (!d.children) {
+            var t = tipTraitColor(d);
+            if (t) return t;
+            var c = inheritedColor(d);
+            if (c) return c;
+          }
+          return '#fff';
+        })
+        .on('click', function(event, d) {
+          if (!d.children) return;
+          event.stopPropagation();
+          showCladePopover(d, event.clientX, event.clientY);
+        });
+
+      // Support value circles
+      if (showSupport && supportRange) {
+        node.filter(function(d) { return d.children && typeof d.data.support === 'number'; })
+          .append('circle')
+          .attr('class', 'support-dot')
+          .attr('r', function(d) {
+            var norm = supportRange.isPercent ? d.data.support / 100 : d.data.support;
+            return 2 + Math.max(0, Math.min(1, norm)) * 4;
+          })
+          .attr('fill', function(d) { return supportColor(d.data.support, supportRange); });
+      }
+
+      // Leaf labels — trait > clade > default
+      node.filter(function(d) { return !d.children; })
+        .append('text')
+        .attr('class', function(d) { return italicize && isBinomial(d.data.name) ? 'binomial' : null; })
+        .attr('transform', function(d) {
+          var deg = d.angle * 180 / Math.PI;
+          var flip = deg > 90 || deg < -90;
+          return 'rotate(' + (flip ? deg + 180 : deg) + ')';
+        })
+        .attr('x', function(d) {
+          var deg = d.angle * 180 / Math.PI;
+          return (deg > 90 || deg < -90) ? -8 : 8;
+        })
+        .attr('text-anchor', function(d) {
+          var deg = d.angle * 180 / Math.PI;
+          return (deg > 90 || deg < -90) ? 'end' : 'start';
+        })
+        .attr('dy', '0.35em')
+        .attr('fill', function(d) { return tipTraitColor(d) || inheritedColor(d) || '#0f172a'; })
+        .text(function(d) { return d.data.name; });
+
+      // Internal labels
+      if (showInternal) {
+        node.filter(function(d) { return d.children && d.data.name; })
+          .append('text')
+          .attr('dx', -6).attr('dy', -8)
+          .attr('text-anchor', 'end')
+          .style('font-size', '9px')
+          .text(function(d) { return d.data.name; });
+      }
+
+      attachHoverHighlight(g, root);
+    }
+
+    // ── Export ──
+    function exportAs(format) {
+      var svgEl = document.querySelector('#tree-container svg');
+      if (!svgEl) return;
+
+      // Clone and add styles
+      var clone = svgEl.cloneNode(true);
+      var style = document.createElement('style');
+      style.textContent = '.tree-link{fill:none;stroke:#1e293b;stroke-width:1;stroke-linecap:round;stroke-linejoin:round}.tree-node circle{fill:#fff;stroke:#1e293b;stroke-width:1.2}.tree-node.internal circle{display:none}.tree-node text{font-family:Inter,sans-serif;font-size:11px;fill:#0f172a;font-weight:400}.tree-node text.binomial{font-style:italic}.tree-node.internal text{fill:#94a3b8;font-size:9px}.tree-scale-bar line{stroke:#1e293b;stroke-width:1.2}.tree-scale-bar text{font-family:monospace;font-size:10px;fill:#475569}';
+      clone.insertBefore(style, clone.firstChild);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+      var svgData = new XMLSerializer().serializeToString(clone);
+      var blob = new Blob([svgData], { type: 'image/svg+xml' });
+
+      if (format === 'svg') {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'phylogenetic-tree.svg';
+        a.click();
+      } else {
+        var img = new Image();
+        var url = URL.createObjectURL(blob);
+        img.onload = function() {
+          var canvas = document.createElement('canvas');
+          canvas.width = img.width * 3;
+          canvas.height = img.height * 3;
+          var ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob(function(b) {
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(b);
+            a.download = 'phylogenetic-tree.png';
+            a.click();
+          });
+          URL.revokeObjectURL(url);
+        };
+        img.src = url;
+      }
+    }
+
+    // Load default
+    loadExample('primates');
+
+    // Listen for parent messages
+    window.addEventListener('message', function(e) {
+      if (e.data && e.data.type === 'load-data') {
+        document.getElementById('newickInput').value = e.data.data;
+        renderTree();
+      }
+      if (e.data && e.data.type === 'get-svg-for-canvas') {
+        var svgEl = document.querySelector('#tree-container svg');
+        if (!svgEl) return;
+        var clone = svgEl.cloneNode(true);
+        var style = document.createElement('style');
+        style.textContent = '.tree-link{fill:none;stroke:#1e293b;stroke-width:1;stroke-linecap:round;stroke-linejoin:round}.tree-node circle{fill:#fff;stroke:#1e293b;stroke-width:1.2}.tree-node.internal circle{display:none}.tree-node text{font-family:Inter,sans-serif;font-size:11px;fill:#0f172a;font-weight:400}.tree-node text.binomial{font-style:italic}.tree-node.internal text{fill:#94a3b8;font-size:9px}.tree-scale-bar line{stroke:#1e293b;stroke-width:1.2}.tree-scale-bar text{font-family:monospace;font-size:10px;fill:#475569}';
+        clone.insertBefore(style, clone.firstChild);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        var data = new XMLSerializer().serializeToString(clone);
+        window.parent.postMessage({ type: 'phylo-svg-for-canvas', svg: data }, '*');
+      }
+    });
+  </script>
+</body>
+</html>

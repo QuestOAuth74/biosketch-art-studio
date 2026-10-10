@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Molecular Structure Renderer - BioSketch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/smiles-drawer@2.2.1/dist/smiles-drawer.min.js"></script>
+  <style>
+    :root {
+      --bs-primary: #2563eb;
+      --bs-primary-light: #eff6ff;
+      --bs-primary-dark: #1d4ed8;
+      --bs-bg: #f4f5f7;
+      --bs-surface: #ffffff;
+      --bs-border: #e2e8f0;
+      --bs-border-light: #f1f5f9;
+      --bs-text: #0f172a;
+      --bs-text-secondary: #475569;
+      --bs-text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bs-bg);
+      color: var(--bs-text);
+      -webkit-font-smoothing: antialiased;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .main { flex: 1; display: flex; overflow: hidden; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 280px;
+      min-width: 280px;
+      border-right: 1px solid var(--bs-border);
+      background: var(--bs-surface);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--bs-border-light);
+    }
+
+    .sidebar-section h3 {
+      font-size: 9px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--bs-text-muted);
+      margin-bottom: 10px;
+    }
+
+    /* Input */
+    .smiles-input {
+      width: 100%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      padding: 8px 10px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px;
+      outline: none;
+      transition: all 0.12s ease;
+      resize: vertical;
+      min-height: 52px;
+      color: var(--bs-text);
+      background: var(--bs-surface);
+    }
+
+    .smiles-input:focus {
+      border-color: var(--bs-primary);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
+    }
+
+    .render-btn {
+      width: 100%;
+      padding: 8px;
+      background: var(--bs-primary);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.12s ease;
+      margin-top: 8px;
+    }
+
+    .render-btn:hover { background: var(--bs-primary-dark); }
+
+    /* Example pills */
+    .examples-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .example-btn {
+      padding: 4px 8px;
+      background: var(--bs-border-light);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      font-size: 10px;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.12s ease;
+      color: var(--bs-text-secondary);
+    }
+
+    .example-btn:hover {
+      background: var(--bs-primary-light);
+      border-color: var(--bs-primary);
+      color: var(--bs-primary);
+    }
+
+    /* Export buttons */
+    .export-row { display: flex; gap: 6px; }
+
+    .export-btn {
+      flex: 1;
+      padding: 7px 10px;
+      background: var(--bs-surface);
+      border: 1px solid var(--bs-border);
+      border-radius: 8px;
+      font-family: 'Inter', sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      color: var(--bs-text-secondary);
+      transition: all 0.12s ease;
+    }
+
+    .export-btn:hover {
+      background: var(--bs-primary-light);
+      color: var(--bs-primary);
+      border-color: var(--bs-primary);
+    }
+
+    /* Molecule info */
+    .mol-info {
+      font-size: 11px;
+      color: var(--bs-text-secondary);
+      line-height: 1.7;
+    }
+
+    .mol-info strong { color: var(--bs-text); font-weight: 600; }
+
+    .mol-info code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      background: var(--bs-border-light);
+      padding: 1px 5px;
+      border-radius: 3px;
+      word-break: break-all;
+    }
+
+    /* Info box */
+    .info-box {
+      padding: 10px 12px;
+      background: var(--bs-primary-light);
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      font-size: 10px;
+      color: #1e40af;
+      line-height: 1.6;
+    }
+
+    .info-box strong { font-weight: 600; }
+    .info-box code { font-family: 'JetBrains Mono', monospace; font-size: 10px; background: rgba(37,99,235,0.08); padding: 1px 4px; border-radius: 2px; }
+
+    /* ── Canvas area ── */
+    .canvas-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bs-bg);
+      padding: 20px;
+    }
+
+    .canvas-wrapper {
+      background: var(--bs-surface);
+      border-radius: 12px;
+      border: 1px solid var(--bs-border);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+      overflow: hidden;
+    }
+
+    #mol-canvas { background: #fff; display: block; }
+
+    /* Attribution */
+    #attribution {
+      position: fixed; bottom: 4px; right: 8px;
+      font-size: 9px; color: var(--bs-text-muted); opacity: 0.5;
+      font-family: 'Inter', sans-serif;
+    }
+    #attribution a { color: var(--bs-text-secondary); text-decoration: none; }
+    #attribution a:hover { text-decoration: underline; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="main">
+    <div class="sidebar">
+      <!-- SMILES Input -->
+      <div class="sidebar-section">
+        <h3>SMILES Input</h3>
+        <textarea id="smilesInput" class="smiles-input" placeholder="Enter SMILES string...">c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34</textarea>
+        <button class="render-btn" onclick="renderSmiles()">Render Structure</button>
+      </div>
+
+      <!-- Examples -->
+      <div class="sidebar-section">
+        <h3>Common Molecules</h3>
+        <div id="examples" class="examples-grid"></div>
+      </div>
+
+      <!-- Export -->
+      <div class="sidebar-section">
+        <h3>Export</h3>
+        <div class="export-row">
+          <button class="export-btn" onclick="exportAs('png')">PNG</button>
+          <button class="export-btn" onclick="exportAs('svg')">SVG</button>
+        </div>
+      </div>
+
+      <!-- Info -->
+      <div class="sidebar-section" style="flex:1;">
+        <h3>Molecule Info</h3>
+        <div id="molInfo" class="mol-info">
+          <em style="color:var(--bs-text-muted)">Render a molecule to see info</em>
+        </div>
+      </div>
+
+      <!-- Help -->
+      <div class="sidebar-section">
+        <div class="info-box">
+          <strong>SMILES notation</strong><br>
+          <code>CCO</code> = ethanol &nbsp;|&nbsp;
+          <code>c1ccccc1</code> = benzene<br>
+          Use the search bar above to find any compound by name.
+        </div>
+      </div>
+    </div>
+
+    <div class="canvas-area">
+      <div class="canvas-wrapper">
+        <canvas id="mol-canvas" width="700" height="550"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div id="attribution">
+    <a href="https://biosketch.art" target="_blank">Biosketch.Art</a> — Powered by <a href="https://github.com/reymond-group/smilesDrawer" target="_blank">SmilesDrawer</a> (MIT)
+  </div>
+
+  <script>
+    var drawer = new SmilesDrawer.Drawer({ width: 700, height: 550, bondThickness: 1.5, bondLength: 22, shortBondLength: 0.85, fontSizeLarge: 12, fontSizeSmall: 8, padding: 40 });
+    var svgDrawer = new SmilesDrawer.SvgDrawer({ width: 700, height: 550, bondThickness: 1.5, bondLength: 22, shortBondLength: 0.85, fontSizeLarge: 12, fontSizeSmall: 8, padding: 40 });
+
+    var examples = [
+      { name: 'Ethanol', smiles: 'CCO' },
+      { name: 'Benzene', smiles: 'c1ccccc1' },
+      { name: 'Aspirin', smiles: 'CC(=O)Oc1ccccc1C(=O)O' },
+      { name: 'Caffeine', smiles: 'Cn1cnc2c1c(=O)n(c(=O)n2C)C' },
+      { name: 'Glucose', smiles: 'OC[C@H]1OC(O)[C@H](O)[C@@H](O)[C@@H]1O' },
+      { name: 'Dopamine', smiles: 'NCCc1ccc(O)c(O)c1' },
+      { name: 'Ibuprofen', smiles: 'CC(C)Cc1ccc(cc1)C(C)C(=O)O' },
+      { name: 'Cholesterol', smiles: 'CC(CCCC(C)C)C1CCC2C1(CCC3C2CC=C4C3(CCC(C4)O)C)C' },
+      { name: 'ATP', smiles: 'c1nc(c2c(n1)n(cn2)[C@@H]3[C@@H]([C@@H]([C@H](O3)COP(=O)(O)OP(=O)(O)OP(=O)(O)O)O)O)N' },
+      { name: 'Penicillin', smiles: 'CC1(C(N2C(S1)C(C2=O)NC(=O)Cc3ccccc3)C(=O)O)C' },
+      { name: 'Serotonin', smiles: 'NCCc1c[nH]c2ccc(O)cc12' },
+      { name: 'GABA', smiles: 'NCCCC(=O)O' },
+    ];
+
+    var exDiv = document.getElementById('examples');
+    examples.forEach(function(ex) {
+      var btn = document.createElement('button');
+      btn.className = 'example-btn';
+      btn.textContent = ex.name;
+      btn.onclick = function() {
+        document.getElementById('smilesInput').value = ex.smiles;
+        renderSmiles();
+      };
+      exDiv.appendChild(btn);
+    });
+
+    function renderSmiles() {
+      var smiles = document.getElementById('smilesInput').value.trim();
+      if (!smiles) return;
+
+      SmilesDrawer.parse(smiles, function(tree) {
+        var canvas = document.getElementById('mol-canvas');
+        drawer.draw(tree, canvas, 'light');
+
+        var atomCount = '—', bondCount = '—';
+        try {
+          if (tree.graph && tree.graph.vertices) atomCount = tree.graph.vertices.length;
+          else if (tree.vertices) atomCount = tree.vertices.length;
+        } catch(e) {}
+        try {
+          if (tree.graph && tree.graph.edges) bondCount = tree.graph.edges.length;
+          else if (tree.edges) bondCount = tree.edges.length;
+        } catch(e) {}
+
+        document.getElementById('molInfo').innerHTML =
+          '<strong>SMILES:</strong> <code>' + smiles + '</code><br>' +
+          '<strong>Status:</strong> <span style="color:#16a34a">Rendered successfully</span>';
+      }, function(err) {
+        document.getElementById('molInfo').innerHTML = '<span style="color:#dc2626">Error: Invalid SMILES string</span>';
+      });
+    }
+
+    function exportAs(format) {
+      var smiles = document.getElementById('smilesInput').value.trim();
+      if (!smiles) { alert('Render a molecule first'); return; }
+
+      if (format === 'png') {
+        var canvas = document.getElementById('mol-canvas');
+        canvas.toBlob(function(blob) {
+          var a = document.createElement('a');
+          a.download = 'molecule.png';
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+      } else if (format === 'svg') {
+        SmilesDrawer.parse(smiles, function(tree) {
+          var svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svgEl.setAttribute('width', '700');
+          svgEl.setAttribute('height', '550');
+          svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+          document.body.appendChild(svgEl);
+          svgDrawer.draw(tree, svgEl, 'light');
+          var svgData = new XMLSerializer().serializeToString(svgEl);
+          document.body.removeChild(svgEl);
+          var blob = new Blob([svgData], { type: 'image/svg+xml' });
+          var a = document.createElement('a');
+          a.download = 'molecule.svg';
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+      }
+    }
+
+    renderSmiles();
+
+    // Listen for parent messages
+    window.addEventListener('message', function(e) {
+      if (e.data && e.data.type === 'get-svg-for-canvas') {
+        var smiles = document.getElementById('smilesInput').value.trim();
+        if (!smiles) { alert('Render a molecule first'); return; }
+
+        SmilesDrawer.parse(smiles, function(tree) {
+          var svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svgEl.setAttribute('width', '700');
+          svgEl.setAttribute('height', '550');
+          svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+          document.body.appendChild(svgEl);
+          svgDrawer.draw(tree, svgEl, 'light');
+          var svgData = new XMLSerializer().serializeToString(svgEl);
+          document.body.removeChild(svgEl);
+          window.parent.postMessage({ type: 'smiles-svg-for-canvas', svg: svgData }, '*');
+        }, function(err) {
+          alert('Cannot export: invalid SMILES');
+        });
+        return;
+      }
+
+      if (e.data && e.data.type === 'render-smiles') {
+        document.getElementById('smilesInput').value = e.data.smiles;
+        renderSmiles();
+
+        if (e.data.props) {
+          var p = e.data.props;
+          var info = '';
+          if (e.data.name) info += '<strong>' + e.data.name + '</strong><br>';
+          if (p.IUPACName) info += '<strong>IUPAC:</strong> ' + p.IUPACName + '<br>';
+          if (p.MolecularFormula) info += '<strong>Formula:</strong> ' + p.MolecularFormula + '<br>';
+          if (p.MolecularWeight) info += '<strong>MW:</strong> ' + p.MolecularWeight + ' g/mol<br>';
+          info += '<strong>SMILES:</strong> <code>' + e.data.smiles + '</code>';
+          document.getElementById('molInfo').innerHTML = info;
+        }
+      }
+    });
+  </script>
+</body>
+</html>

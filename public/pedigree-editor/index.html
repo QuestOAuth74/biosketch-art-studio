@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pedigree Chart Maker - BioSketch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- PrototypeJS and scriptaculous -->
+  <script type="text/javascript" src="public/vendor/prototype-1.7.3.js"></script>
+  <script type="text/javascript" src="public/vendor/scriptaculous/effects.js"></script>
+  <script type="text/javascript" src="public/vendor/scriptaculous/dragdrop.js"></script>
+  <script type="text/javascript" src="public/vendor/scriptaculous/slider.js"></script>
+
+  <!-- File download -->
+  <script type="text/javascript" src="public/vendor/filesaver/Blob.js"></script>
+  <script type="text/javascript" src="public/vendor/filesaver/FileSaver.js"></script>
+
+  <!-- PDF support -->
+  <script type="text/javascript" src="public/vendor/pdfkit/pdfkit.standalone.js"></script>
+  <script type="text/javascript" src="public/vendor/pdfkit/blob-stream.js"></script>
+  <script type="text/javascript" src="public/vendor/pdfkit/svg-to-pdfkit.js"></script>
+
+  <!-- XWiki REST API and widgets -->
+  <script type="text/javascript" src="public/vendor/xwiki/xwiki-min.js"></script>
+  <script type="text/javascript" src="public/vendor/phenotips/Widgets.js"></script>
+  <script type="text/javascript" src="public/vendor/phenotips/DateTimePicker.js"></script>
+
+  <!-- Block GitHub navigation and hide close button -->
+  <script type="text/javascript">
+    // The editor's "Close" button navigates to GitHub by default.
+    // We block this by intercepting the click on #action-close after the DOM loads.
+    document.addEventListener('DOMContentLoaded', function() {
+      // Repeatedly check for the close button and disable it
+      var interval = setInterval(function() {
+        var closeBtn = document.getElementById('action-close');
+        if (closeBtn) {
+          closeBtn.style.display = 'none';
+          clearInterval(interval);
+        }
+      }, 200);
+    });
+
+    // Also override window.location setter as a safety net
+    var _origReplace = window.location.replace;
+    window.location.replace = function(url) {
+      if (url && typeof url === 'string' && (url.indexOf('github.com') !== -1 || url.indexOf('phenotips.com') !== -1)) return;
+      _origReplace.call(window.location, url);
+    };
+  </script>
+
+  <!-- Open Pedigree bundle -->
+  <script type="text/javascript" src="dist/pedigree.min.js"></script>
+
+  <!-- Post-load: intercept GitHub links + expose export to parent -->
+  <script type="text/javascript">
+    // Block navigation to external sites only — don't interfere with internal UI
+    document.addEventListener('click', function(e) {
+      var link = e.target.closest('a');
+      if (link && link.href) {
+        // Only block links that navigate OUTSIDE the app
+        var href = link.href;
+        if (href.includes('github.com') || href.includes('phenotips.com') || href.includes('broadinstitute.org')) {
+          e.preventDefault();
+          return false;
+        }
+      }
+      // Block the close button
+      if (e.target.id === 'action-close' || (e.target.parentElement && e.target.parentElement.id === 'action-close')) {
+        e.preventDefault();
+        return false;
+      }
+    }, true);
+
+    // PNG/JPG export is now built into the pedigree bundle — no injection needed
+
+    // Inline computed styles onto SVG elements so Fabric.js can read them.
+    // Raphael.js uses gradient fills like fill="url(#gradientId)" which break
+    // when the SVG is serialized — Fabric.js can't resolve those IDs and defaults to black.
+    function inlineStyles(origSvg, cloneSvg) {
+      var props = ['stroke', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity',
+                   'font-family', 'font-size', 'font-weight', 'text-anchor', 'display', 'visibility',
+                   'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin'];
+      // Walk the ORIGINAL SVG to read computed styles (clone may not inherit CSS correctly)
+      var origEls = origSvg.querySelectorAll('*');
+      var cloneEls = cloneSvg.querySelectorAll('*');
+
+      for (var i = 0; i < origEls.length && i < cloneEls.length; i++) {
+        var origEl = origEls[i];
+        var el = cloneEls[i];
+        if (!origEl.style) continue;
+        var computed = window.getComputedStyle(origEl);
+
+        // Handle fill specially — always resolve url(#...) gradient references to solid color
+        var fillAttr = origEl.getAttribute('fill') || '';
+        var computedFill = computed.getPropertyValue('fill');
+        if (fillAttr.indexOf('url(') === 0) {
+          // Gradient reference — resolve to computed color (browser computes the mid-gradient color)
+          // Most gradients in pedigree are white-to-light, so use white as safe fallback
+          if (computedFill && computedFill !== 'none' && computedFill.indexOf('url(') === -1) {
+            el.setAttribute('fill', computedFill);
+          } else {
+            el.setAttribute('fill', '#ffffff');
+          }
+        } else if (!computedFill || computedFill === 'none' || computedFill === 'rgba(0, 0, 0, 0)' || computedFill === 'transparent') {
+          el.setAttribute('fill', 'none');
+        } else if (!fillAttr) {
+          el.setAttribute('fill', computedFill);
+        }
+
+        // Inline other properties
+        for (var j = 0; j < props.length; j++) {
+          var val = computed.getPropertyValue(props[j]);
+          if (val && val !== '' && val !== 'none' && val !== 'normal') {
+            if (!el.getAttribute(props[j])) {
+              el.setAttribute(props[j], val);
+            }
+          }
+        }
+
+        // Always inline stroke from computed (Raphael may set it via attr)
+        var computedStroke = computed.getPropertyValue('stroke');
+        if (computedStroke && computedStroke !== 'none') {
+          el.setAttribute('stroke', computedStroke);
+        }
+
+        // If display is none, remove the element entirely
+        if (computed.getPropertyValue('display') === 'none') {
+          el.parentNode && el.parentNode.removeChild(el);
+        }
+      }
+
+      // Remove gradient defs that are no longer referenced
+      var defs = cloneSvg.querySelector('defs');
+      if (defs) {
+        var gradients = defs.querySelectorAll('linearGradient, radialGradient');
+        for (var i = 0; i < gradients.length; i++) {
+          gradients[i].parentNode.removeChild(gradients[i]);
+        }
+      }
+    }
+
+    // Listen for "get SVG for canvas" request from parent
+    window.addEventListener('message', function(e) {
+      if (e.data && e.data.type === 'get-svg-for-canvas') {
+        try {
+          // Grab the live DOM SVG and inline all computed styles
+          var svgEl = document.querySelector('#work-area svg') || document.querySelector('svg');
+          if (!svgEl) { alert('No pedigree to export.'); return; }
+
+          var clone = svgEl.cloneNode(true);
+          // Remove hover elements and UI overlays
+          var removeSelectors = '[class*="hoverbox"], [class*="hover-"], .delete-button, .menu-box, .handle';
+          var toRemove = clone.querySelectorAll(removeSelectors);
+          for (var i = 0; i < toRemove.length; i++) { toRemove[i].parentNode && toRemove[i].parentNode.removeChild(toRemove[i]); }
+
+          // Inline styles from the ORIGINAL live SVG (has correct computed styles)
+          // onto the clone (which will be serialized)
+          inlineStyles(svgEl, clone);
+
+          // Clean up: set xmlns, remove classes (no longer needed)
+          clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+          var allEls = clone.querySelectorAll('[class]');
+          for (var i = 0; i < allEls.length; i++) { allEls[i].removeAttribute('class'); }
+
+          var svgString = new XMLSerializer().serializeToString(clone);
+          window.parent.postMessage({ type: 'svg-for-canvas', svg: svgString }, '*');
+        } catch (err) {
+          console.error('Failed to get SVG:', err);
+          // Fallback: raw DOM SVG
+          var svgEl = document.querySelector('#work-area svg') || document.querySelector('svg');
+          if (svgEl) {
+            var svgString = new XMLSerializer().serializeToString(svgEl);
+            window.parent.postMessage({ type: 'svg-for-canvas', svg: svgString }, '*');
+          }
+        }
+      }
+    });
+  </script>
+
+  <style>
+    /* ═══════════════════════════════════════════════════
+       BIOSKETCH PEDIGREE — FULL UI OVERRIDE
+       ═══════════════════════════════════════════════════ */
+    :root {
+      --bs-primary: #2563eb;
+      --bs-primary-light: #eff6ff;
+      --bs-primary-dark: #1d4ed8;
+      --bs-bg: #f8fafc;
+      --bs-surface: #ffffff;
+      --bs-border: #e2e8f0;
+      --bs-border-light: #f1f5f9;
+      --bs-text: #0f172a;
+      --bs-text-secondary: #64748b;
+      --bs-text-muted: #94a3b8;
+      --bs-radius: 8px;
+      --bs-radius-lg: 12px;
+      --bs-shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
+      --bs-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      --bs-shadow-lg: 0 12px 40px rgba(0,0,0,0.12);
+      --bs-transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bs-bg);
+      color: var(--bs-text);
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── TOP MENU BAR ── */
+    #editor-menu {
+      background: var(--bs-surface) !important;
+      border-bottom: 1px solid var(--bs-border) !important;
+      box-shadow: none !important;
+      padding: 6px 12px !important;
+      display: flex !important;
+      align-items: center !important;
+      gap: 4px !important;
+      height: 44px !important;
+    }
+
+    #editor-menu .action-group {
+      display: flex !important; align-items: center !important; gap: 2px !important; margin: 0 !important;
+    }
+    #editor-menu .action-group:not(:last-of-type) {
+      border-right: 1px solid var(--bs-border) !important; padding-right: 8px !important; margin-right: 4px !important;
+    }
+
+    #editor-menu .menu-item {
+      background: transparent !important; border: none !important; border-radius: 6px !important;
+      padding: 6px 10px !important; font-family: 'Inter', sans-serif !important; font-size: 11px !important;
+      font-weight: 500 !important; color: var(--bs-text-secondary) !important; cursor: pointer !important;
+      transition: var(--bs-transition) !important; display: flex !important; align-items: center !important;
+      gap: 5px !important; white-space: nowrap !important;
+    }
+    #editor-menu .menu-item:hover { background: var(--bs-primary-light) !important; color: var(--bs-primary) !important; }
+    #editor-menu .menu-item img, #editor-menu .menu-item .fa, #editor-menu .menu-item i { opacity: 0.7 !important; }
+    #editor-menu .menu-item:hover img, #editor-menu .menu-item:hover .fa { opacity: 1 !important; }
+    #editor-menu .disabled-menu-item { opacity: 0.35 !important; pointer-events: none !important; }
+
+    /* Show our title, hide old branding + external links */
+    #editor-menu span.title {
+      display: inline-block !important;
+      font-family: 'Inter', sans-serif !important;
+      font-weight: 700 !important;
+      font-size: 14px !important;
+      color: var(--bs-text) !important;
+      letter-spacing: -0.01em !important;
+      margin-right: 8px !important;
+    }
+    #editor-menu a.title, #editor-menu .powered-by,
+    .phenotips-logo, #phenotips-branding, .xwiki-branding,
+    a[href*="github.com"], a[href*="phenotips.com"],
+    #action-close { display: none !important; }
+
+    /* ── ZOOM ── */
+    .view-controls-zoom {
+      background: var(--bs-surface) !important; border: 1px solid var(--bs-border) !important;
+      border-radius: var(--bs-radius) !important; box-shadow: var(--bs-shadow-sm) !important;
+    }
+    .view-controls-zoom .zoom-button {
+      background: transparent !important; border: none !important; border-radius: 4px !important;
+      cursor: pointer !important; transition: var(--bs-transition) !important;
+    }
+    .view-controls-zoom .zoom-button:hover { background: var(--bs-primary-light) !important; }
+    .view-controls-zoom .zoom-crt-value { font-family: 'Inter' !important; font-size: 10px !important; font-weight: 600 !important; color: var(--bs-text-secondary) !important; }
+    .view-control-pan { background: var(--bs-surface) !important; border: 1px solid var(--bs-border) !important; border-radius: var(--bs-radius) !important; box-shadow: var(--bs-shadow-sm) !important; }
+    .view-control-pan:hover { background: var(--bs-primary-light) !important; }
+
+    /* ── CANVAS ── */
+    #work-area, .pedigree-wrapper { background: var(--bs-bg) !important; }
+
+    /* ── NODE MENUS ── */
+    .menu-box {
+      font-family: 'Inter', sans-serif !important; background: var(--bs-surface) !important;
+      border: 1px solid var(--bs-border) !important; border-radius: var(--bs-radius-lg) !important;
+      box-shadow: var(--bs-shadow-lg) !important; animation: fadeIn 0.15s ease-out !important;
+    }
+    .menu-box .close-button {
+      background: transparent !important; border: none !important; border-radius: 6px !important;
+      cursor: pointer !important; transition: var(--bs-transition) !important; color: var(--bs-text-muted) !important;
+    }
+    .menu-box .close-button:hover { background: #fef2f2 !important; color: #dc2626 !important; }
+
+    /* Tabs */
+    .menu-box .tabs { border-bottom: 1px solid var(--bs-border) !important; padding: 0 12px !important; }
+    .menu-box .tabs dd, .menu-box .tabs .tab-title { border: none !important; background: transparent !important; margin: 0 !important; }
+    .menu-box .tabs dd a, .menu-box .tabs .tab-title a {
+      font-family: 'Inter' !important; font-size: 12px !important; font-weight: 500 !important;
+      color: var(--bs-text-secondary) !important; padding: 10px 14px !important; text-decoration: none !important;
+      border-bottom: 2px solid transparent !important; transition: var(--bs-transition) !important;
+    }
+    .menu-box .tabs dd.active a { color: var(--bs-primary) !important; border-bottom-color: var(--bs-primary) !important; font-weight: 600 !important; }
+
+    /* Form fields */
+    .menu-box .field-box { padding: 6px 14px !important; }
+    .menu-box .field-box label, .menu-box .field-name {
+      font-family: 'Inter' !important; font-size: 11px !important; font-weight: 600 !important;
+      color: var(--bs-text-secondary) !important; text-transform: uppercase !important; letter-spacing: 0.03em !important;
+    }
+    .menu-box .field-box input[type=text], .menu-box .field-box textarea, .menu-box .field-box select,
+    .menu-box input[type=text], .menu-box textarea, .menu-box select {
+      font-family: 'Inter' !important; font-size: 13px !important;
+      border: 1px solid var(--bs-border) !important; border-radius: 6px !important;
+      padding: 7px 10px !important; color: var(--bs-text) !important; background: var(--bs-surface) !important;
+      transition: var(--bs-transition) !important; outline: none !important;
+    }
+    .menu-box .field-box input:focus, .menu-box input[type=text]:focus, .menu-box textarea:focus {
+      border-color: var(--bs-primary) !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.1) !important;
+    }
+
+    /* Buttons */
+    .menu-box button, .menu-box input[type=button], .menu-box .button {
+      font-family: 'Inter' !important; font-size: 12px !important; font-weight: 500 !important;
+      border-radius: 6px !important; padding: 7px 14px !important; cursor: pointer !important;
+      transition: var(--bs-transition) !important;
+    }
+    .menu-box .button.secondary, .menu-box .cancel { background: var(--bs-bg) !important; border: 1px solid var(--bs-border) !important; color: var(--bs-text-secondary) !important; }
+    .menu-box .button.secondary:hover, .menu-box .cancel:hover { background: var(--bs-border-light) !important; color: var(--bs-text) !important; }
+    .menu-box .button.primary, .menu-box .accept { background: var(--bs-primary) !important; border: 1px solid var(--bs-primary) !important; color: #fff !important; }
+    .menu-box .button.primary:hover, .menu-box .accept:hover { background: var(--bs-primary-dark) !important; }
+    .menu-box input[type="radio"], .menu-box input[type="checkbox"] { accent-color: var(--bs-primary) !important; }
+
+    /* ── TEMPLATE SELECTOR ── */
+    .template-picture-container {
+      border-radius: var(--bs-radius) !important; border: 2px solid var(--bs-border) !important;
+      transition: var(--bs-transition) !important; overflow: hidden !important;
+    }
+    .template-picture-container:hover { border-color: var(--bs-primary) !important; box-shadow: var(--bs-shadow) !important; }
+    .template-picture-container.selected { border-color: var(--bs-primary) !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.15) !important; }
+
+    /* ── IMPORT/EXPORT TEXTAREAS ── */
+    .import-selector textarea, .export-selector textarea {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace !important; font-size: 11px !important;
+      border-radius: var(--bs-radius) !important; border: 1px solid var(--bs-border) !important;
+      background: #f8fafc !important; padding: 10px !important;
+    }
+
+    /* ── LEGEND ── */
+    .pedigree-legend, .legend-box {
+      font-family: 'Inter' !important; background: var(--bs-surface) !important;
+      border: 1px solid var(--bs-border) !important; border-radius: var(--bs-radius) !important;
+      box-shadow: var(--bs-shadow-sm) !important; font-size: 11px !important;
+    }
+
+    /* ── DIALOGS — Glassmorphic Theme ── */
+    .msdialog-screen {
+      background: rgba(15, 23, 42, 0.35) !important;
+      backdrop-filter: blur(12px) !important;
+      -webkit-backdrop-filter: blur(12px) !important;
+    }
+
+    .msdialog-box,
+    .msdialog-modal-container {
+      font-family: 'Inter', sans-serif !important;
+      border-radius: 20px !important;
+      border: 1px solid rgba(255, 255, 255, 0.2) !important;
+      background: rgba(255, 255, 255, 0.85) !important;
+      backdrop-filter: blur(20px) saturate(180%) !important;
+      -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+      box-shadow:
+        0 24px 48px rgba(0, 0, 0, 0.12),
+        0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+        0 1px 0 rgba(255, 255, 255, 0.4) inset !important;
+      animation: dialogAppear 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    }
+
+    @keyframes dialogAppear {
+      from { opacity: 0; transform: scale(0.96) translateY(8px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+
+    /* Dialog title bar */
+    .msdialog-modal-container .msdialog-title,
+    .msdialog-box .msdialog-title {
+      font-family: 'Inter', sans-serif !important;
+      font-weight: 600 !important;
+      font-size: 16px !important;
+      color: var(--bs-text) !important;
+      padding: 20px 24px 12px !important;
+      border-bottom: 1px solid rgba(0, 0, 0, 0.06) !important;
+      background: transparent !important;
+      letter-spacing: -0.01em !important;
+    }
+
+    .msdialog-box .msdialog-content {
+      padding: 16px 24px 20px !important;
+    }
+
+    /* Dialog close button */
+    .msdialog-modal-container .msdialog-close,
+    .msdialog-box .msdialog-close {
+      background: rgba(0, 0, 0, 0.04) !important;
+      border: none !important;
+      border-radius: 10px !important;
+      width: 32px !important;
+      height: 32px !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      cursor: pointer !important;
+      transition: var(--bs-transition) !important;
+      color: var(--bs-text-muted) !important;
+    }
+    .msdialog-modal-container .msdialog-close:hover,
+    .msdialog-box .msdialog-close:hover {
+      background: rgba(239, 68, 68, 0.1) !important;
+      color: #dc2626 !important;
+    }
+
+    /* Template chooser specific */
+    .msdialog-modal-container .pedigree-template-chooser {
+      width: 560px !important;
+    }
+
+    .picture-box {
+      display: inline-block !important;
+      border-radius: 12px !important;
+      overflow: hidden !important;
+      border: 2px solid rgba(0, 0, 0, 0.06) !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06) !important;
+      margin: 8px !important;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+      background: var(--bs-surface) !important;
+    }
+
+    .picture-box:hover {
+      cursor: pointer !important;
+      border-color: var(--bs-primary) !important;
+      box-shadow: 0 4px 16px rgba(37, 99, 235, 0.15), 0 0 0 3px rgba(37, 99, 235, 0.08) !important;
+      transform: translateY(-2px) !important;
+    }
+
+    .template-picture-container {
+      display: inline-block !important;
+      margin: 6px !important;
+      border-radius: 12px !important;
+      overflow: hidden !important;
+    }
+
+    /* Import/export chooser dialogs */
+    .pedigree-import-chooser {
+      width: auto !important;
+      min-width: 400px !important;
+      max-width: 600px !important;
+    }
+
+    /* Section labels inside dialogs */
+    .import-section {
+      font-family: 'Inter', sans-serif !important;
+      font-size: 11px !important;
+      font-weight: 600 !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.05em !important;
+      color: var(--bs-text-muted) !important;
+      margin-bottom: 8px !important;
+      margin-top: 12px !important;
+    }
+
+    .import-block {
+      padding: 4px 0 !important;
+    }
+
+    /* Radio labels in export/import */
+    .import-type-label,
+    .export-subconfig-label,
+    .export-config-header {
+      font-family: 'Inter', sans-serif !important;
+      font-size: 13px !important;
+      color: var(--bs-text) !important;
+      cursor: pointer !important;
+      padding: 5px 0 !important;
+    }
+
+    .export-config-header {
+      font-weight: 600 !important;
+      font-size: 11px !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.04em !important;
+      color: var(--bs-text-secondary) !important;
+    }
+
+    /* Buttons inside dialogs */
+    .import-block-bottom {
+      padding: 16px 0 4px !important;
+      border-top: 1px solid rgba(0, 0, 0, 0.06) !important;
+      margin-top: 12px !important;
+      display: flex !important;
+      gap: 8px !important;
+      justify-content: flex-end !important;
+    }
+
+    .import-block-bottom .button,
+    .import-block-bottom input[type="button"] {
+      font-family: 'Inter', sans-serif !important;
+      font-size: 13px !important;
+      font-weight: 500 !important;
+      padding: 8px 20px !important;
+      border-radius: 10px !important;
+      cursor: pointer !important;
+      transition: var(--bs-transition) !important;
+      border: none !important;
+    }
+
+    .import-block-bottom input[name="export"],
+    .import-block-bottom input[name="import"] {
+      background: var(--bs-primary) !important;
+      color: #ffffff !important;
+    }
+    .import-block-bottom input[name="export"]:hover,
+    .import-block-bottom input[name="import"]:hover {
+      background: var(--bs-primary-dark) !important;
+    }
+
+    .import-block-bottom .secondary,
+    .import-block-bottom input[name="cancel"] {
+      background: rgba(0, 0, 0, 0.04) !important;
+      color: var(--bs-text-secondary) !important;
+    }
+    .import-block-bottom .secondary:hover,
+    .import-block-bottom input[name="cancel"]:hover {
+      background: rgba(0, 0, 0, 0.08) !important;
+      color: var(--bs-text) !important;
+    }
+
+    /* ── MISC ── */
+    text { font-family: 'Inter', sans-serif !important; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    #license-notice {
+      position: fixed; bottom: 4px; right: 8px; font-size: 9px; color: var(--bs-text-muted); z-index: 1; opacity: 0.6;
+    }
+    #license-notice a { color: var(--bs-text-secondary); text-decoration: none; }
+    #license-notice a:hover { text-decoration: underline; }
+  </style>
+</head>
+
+<body id="body">
+  <div id="license-notice">
+    <a href="https://biosketch.art" target="_blank" rel="noopener">Biosketch.Art</a> powered by <a href="https://gene42.com" target="_blank" rel="noopener">Gene42 Inc</a> Interface
+  </div>
+</body>
+</html>

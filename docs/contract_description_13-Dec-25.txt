@@ -1,0 +1,174 @@
+Contract details:
+
+Milestone Scope & Support:
+
+Each milestone describes the tasks to be completed and the tests that verify that the functionality is performing as expected. Improvements or additions beyond the specified scope can be completed in additional milestones.
+
+Ongoing messaging support, bug fixes and issue resolution is provided for all unaltered code and related database infrastructure within the scope of completed milestones. This support applies exclusively to the codebase and database in their delivered state. Any modifications made after delivery, including changes to styling, configuration, or unrelated features, void this support as they cannot be validated against the delivered testing suite. 
+
+Development & Testing Process:
+
+Development and testing will be conducted using an independently owned and managed Supabase project. All functionality will be validated against this development environment prior to migration. Upon milestone completion, database schema, edge functions, and related configurations will be replicated to the client's production Supabase project - an invitation to the production Supabase project is required to complete this process. Preview deployments will be hosted independently via Vercel for client review at scheduled progress updates.
+
+Testing is designed to verify that specified test cases pass and does not guarantee that the application is free of defects or will meet all user expectations. Test coverage will be as comprehensive as reasonably achievable within the defined scope.
+
+
+Required API Keys:
+
+The following API keys are required for Milestone 1. Keys can be provided for development, but production keys are required for deployment.
+
+- Resend API Key - For branded email delivery (signup verification, password reset)
+
+
+Milestone 1: Database & Authentication
+
+Price: $995 USD
+Estimated timeline: 1-2 weeks
+
+
+1. Database
+
+Current State
+
+- Migrations contain hardcoded seed data that fails on reset
+- ~130 RLS policies exist across tables with good foundation but gaps
+- No seed script exists for populating initial data
+
+Tasks
+
+Seed Script:
+
+- Remove seed data from migrations (20251018034147, 20251018033349, 20251018213609)
+- Create scripts/seed.ts using service role key
+- Add npm run seed script to package.json
+- Seed icon categories (12 categories: chemistry, biology, physics, medical, cells, molecules, lab, anatomy, plants, animals, symbols, other)
+- Seed sample icons for each category (core set for testing)
+- Seed blog categories (3-5 categories with name, slug, color, icon)
+- Seed blog tags (common tags for filtering)
+- Seed sample blog posts (2-3 published posts with TipTap JSON content, SEO metadata, author)
+- Seed testimonials (sample approved testimonials)
+- Seed admin user role assignment
+- Seed site settings (feature flags, rate limits)
+
+RLS Policy Fixes:
+
+- Add missing INSERT policy for profiles table (currently relies only on trigger)
+- Fix icon_categories SELECT policy - currently blocking authenticated users with "permission denied for schema public" error
+- Fix icons SELECT policy - ensure both authenticated and unauthenticated users can read
+- Allow unauthenticated users to view icons and icon_categories (for public landing page showcase)
+- Verify no conflicts between overlapping canvas_projects SELECT policies (5 policies exist: owner, public, approved, admin, collaborator)
+- Ensure login_attempts policies work correctly with edge functions using service role
+
+Tests
+
+Unit:
+
+- After seeding, database contains 12 icon categories
+- After seeding, each icon category has at least one sample icon
+- After seeding, blog categories and tags exist
+- After seeding, admin user role is assigned
+- Unauthenticated user can read icons and categories
+- Authenticated user can read icons and categories
+- Authenticated user can only view own projects + public projects
+- User cannot access another user's private project
+- Admin can access all resources
+- Collaborator can access shared projects
+- Authenticated user can INSERT their own profile via trigger (profile creation on signup)
+- Authenticated user can SELECT their own profile
+- Authenticated user can UPDATE their own profile
+- User cannot SELECT another user's private profile data
+- User cannot UPDATE another user's profile
+- Unauthenticated user cannot INSERT profiles directly
+- Login attempts policies allow edge functions using service role to insert records
+
+Manual:
+
+- Seed script creates all required data types without throwing errors
+- Seed script is idempotent (can run multiple times safely)
+
+
+2. Authentication & Email Verification
+
+Current State
+
+- Supabase Auth is configured (email templates may already be configured in Supabase Dashboard - unknown without project access)
+- Login attempts tracked in login_attempts table
+- Profile creation happens on user signup via trigger
+- Existing UX for email verification:
+  - Sign-up shows toast: "Account created! Please check your email to verify."
+  - Password reset shows toast: "Check your email - We've sent you a password reset link"
+  - Auth page handles recovery type in URL hash to show password update form
+- No custom Edge Function for branded email delivery
+- No dedicated verify email page - users stay on auth page after signup
+
+Tasks
+
+- Set up Resend account and obtain API key for branded email delivery
+- Create Supabase Edge Function send-email to handle auth emails via Resend
+- Configure Edge Function in supabase/config.toml
+- Implement branded email templates for signup and recovery
+- Create email template preview page to display all branded email templates (verification, password reset, etc.)
+- Create user-facing verify email page at /auth/verify-email
+- Update sign-up flow to redirect to verify email page after submission
+- Implement sign-in handling for unverified emails:
+  - Catch "email not confirmed" error
+  - Auto-resend verification email via supabase.auth.resend()
+  - Redirect to verify email page with toast notification
+- Enable Send Email hook in Supabase Dashboard (Authentication > Hooks)
+
+Tests
+
+E2E:
+
+Signup & Email Verification:
+- User can sign up with email and password
+- Sign-up redirects to /auth/verify-email after form submission
+- Verify email page displays "Check your email" heading with appropriate messaging
+- Verify email page shows "Return to Sign In" link
+- "Return to Sign In" link navigates back to auth page
+
+Unverified Email Handling:
+- Sign-in attempt with unverified email detects "Email not confirmed" error
+- Unverified email triggers automatic verification email resend
+- After resend, user is redirected to /auth/verify-email
+- Verify email page displays confirmation that email was resent
+- User can click "Return to Sign In" link to navigate back to auth page
+
+Login & Session Management:
+- User can sign in with valid credentials (verified email + correct password)
+- Sign-in with invalid credentials displays error message or toast
+- User session persists across page refresh (user remains authenticated)
+- User can sign out successfully
+- After sign out, session is cleared and user cannot access protected routes
+
+Password Reset Flow:
+- Forgot password form is accessible from auth page
+- Forgot password form validates email format
+- Submitting valid email shows confirmation message
+- Forgot password form has "Back to Sign In" link
+- Password reset confirmation page validates password requirements (minimum length, etc.)
+- User can successfully set new password via reset link
+- After password reset, user can sign in with new password
+
+Unit:
+
+Edge Function Tests:
+- send-email edge function handles signup event with valid payload
+- send-email edge function handles recovery event with valid payload
+- send-email edge function returns success response for valid requests
+- send-email edge function returns error for missing required fields
+- send-email edge function correctly formats email templates with user data
+
+Database Trigger Tests:
+- Profile creation trigger fires after user signup via Supabase Auth
+- Profile record is created with correct user_id matching auth.users.id
+- Profile creation trigger sets default values for new profiles
+
+Manual:
+
+Email Delivery:
+- Signup sends verification email via Resend (check email received in test inbox)
+- Password reset sends recovery email via Resend (check email received in test inbox)
+- Emails use branded templates with correct formatting
+- Verification email contains clickable verification link
+- Password reset email contains clickable reset link

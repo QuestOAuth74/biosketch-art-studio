@@ -1,0 +1,109 @@
+project_id = "eotmnuwuetomtevhpovx"
+
+[functions.send-announcement]
+verify_jwt = true
+
+[functions.inflate-community-metrics]
+verify_jwt = true
+
+[functions.generate-svg-icon]
+verify_jwt = true
+
+[functions.rate-limited-login]
+verify_jwt = false
+
+[functions.send-share-email]
+verify_jwt = true
+
+[functions.send-contact-reply]
+verify_jwt = false
+
+[functions.send-bulk-email]
+verify_jwt = true
+
+[functions.verify-captcha]
+verify_jwt = false
+
+[functions.generate-figure-from-reference]
+verify_jwt = true
+
+[functions.generate-icon-from-reference]
+verify_jwt = true
+
+[functions.generate-powerpoint]
+verify_jwt = true
+
+[functions.send-email]
+verify_jwt = false
+
+[functions.send-group-invitation]
+verify_jwt = true
+
+[functions.resend-group-invitation]
+verify_jwt = true
+
+[functions.accept-group-invitation]
+verify_jwt = true
+
+[functions.send-project-invitation]
+verify_jwt = true
+
+[functions.accept-project-invitation]
+verify_jwt = true
+
+[functions.invite-project-collaborator]
+verify_jwt = true
+
+[functions.get-invitation-preview]
+verify_jwt = false
+
+[functions.send-page-invitation]
+verify_jwt = true
+
+[functions.accept-page-invitation]
+verify_jwt = true
+
+[functions.send-comment-notification]
+verify_jwt = true
+
+[functions.track-tool-visit]
+verify_jwt = false
+
+[functions.generate-diagram]
+verify_jwt = true
+
+[functions.generate-scientific-diagram]
+verify_jwt = true
+
+[functions.orcid-auth]
+verify_jwt = false
+
+[functions.request-account-deletion]
+verify_jwt = true
+
+[functions.semantic-icon-search]
+verify_jwt = false
+
+[functions.prerender]
+verify_jwt = false
+
+[functions.sitemap]
+verify_jwt = false
+
+[functions.icon-image]
+verify_jwt = false
+
+[functions.extract-image-text]
+verify_jwt = true
+
+[functions.segment-image-objects]
+verify_jwt = true
+
+[functions.verify-image-clean]
+verify_jwt = true
+
+[functions.stripe-webhook]
+verify_jwt = false
+
+[functions.create-credit-checkout-session]
+verify_jwt = true

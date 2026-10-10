@@ -1,0 +1,4880 @@
+import { createContext, useContext, useState, useCallback, ReactNode, useEffect, useMemo, useRef } from "react";
+import { Canvas as FabricCanvas, FabricObject, Rect, Circle, Path, Group, ActiveSelection, util, Gradient, Shadow, FabricImage, Point, Polygon } from "fabric";
+import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
+import { useAuth } from "@/contexts/AuthContext";
+import { useNavigate } from "react-router-dom";
+import { loadAllFonts, getBaseFontName, getCanvasFontFamily, normalizeCanvasTextFonts, getUsedGoogleFonts } from "@/lib/fontLoader";
+import { smoothFabricPath } from "@/lib/pathSmoothing";
+import { GradientConfig, ShadowConfig, LineGradientConfig, ImageFilterConfig, DEFAULT_IMAGE_FILTER_CONFIG, CropMode } from "@/types/effects";
+import { applyImageFilters as applyImageFiltersUtil } from "@/lib/imageFilters";
+import { throttle, debounce, RenderScheduler } from "@/lib/performanceUtils";
+import { safeDownloadDataUrl, reloadCanvasImagesWithCORS } from "@/lib/utils";
+import { removeBackground } from "@/lib/backgroundRemoval";
+import { HistoryManager } from "@/lib/historyManager";
+import { createVersion, isSignificantChange, cleanupVersions } from "@/lib/versionManager";
+import { distributeHorizontally as distributeHorizontallyUtil, distributeVertically as distributeVerticallyUtil, matchWidth as matchWidthUtil, matchHeight as matchHeightUtil, type BoundingBox } from "@/lib/alignmentUtils";
+import { exitImageEditMode as exitImageEditModeFn } from "@/lib/imageMaskTool";
+import { applyCMYKConversion, validateSVGForCMYK, extractColorsFromSVG } from "@/lib/cmykConverter";
+import { fromPixels, Unit } from "@/lib/unitConversion";
+import { useGridAndRulerStore } from "@/stores/gridAndRulerStore";
+
+interface CanvasContextType {
+  canvas: FabricCanvas | null;
+  setCanvas: (canvas: FabricCanvas | null) => void;
+  selectedObject: FabricObject | null;
+  setSelectedObject: (obj: FabricObject | null) => void;
+  firstSelectedObjectRef: React.MutableRefObject<FabricObject | null>;
+  zoom: number;
+  setZoom: (zoom: number) => void;
+  backgroundColor: string;
+  setBackgroundColor: (color: string) => void;
+  backgroundGradient: boolean;
+  setBackgroundGradient: (enabled: boolean) => void;
+  gradientStartColor: string;
+  setGradientStartColor: (color: string) => void;
+  gradientEndColor: string;
+  setGradientEndColor: (color: string) => void;
+  gradientType: 'linear' | 'radial';
+  setGradientType: (type: 'linear' | 'radial') => void;
+  gradientAngle: number;
+  setGradientAngle: (angle: number) => void;
+  gradientCenterX: number;
+  setGradientCenterX: (x: number) => void;
+  gradientCenterY: number;
+  setGradientCenterY: (y: number) => void;
+  gradientRadius: number;
+  setGradientRadius: (radius: number) => void;
+  canvasDimensions: { width: number; height: number };
+  setCanvasDimensions: (dimensions: { width: number; height: number }) => void;
+  paperSize: string;
+  setPaperSize: (sizeId: string) => void;
+  canvasLoadVersion: number;
+  setCanvasLoadVersion: (fn: (prev: number) => number) => void;
+  customDimensions: { width: number; height: number; unit: 'px' | 'in' | 'cm' | 'mm' };
+  setCustomDimensions: (dims: { width: number; height: number; unit: 'px' | 'in' | 'cm' | 'mm' }) => void;
+  currentProjectId: string | null;
+  setCurrentProjectId: (id: string | null) => void;
+  projectOwnerId: string | null;
+  projectName: string;
+  setProjectName: (name: string) => void;
+  isSaving: boolean;
+  isLoadingProject: boolean;
+  iconLoadingProgress: { current: number; total: number } | null;
+  saveProject: (isManualSave?: boolean) => Promise<void>;
+  loadProject: (id: string) => Promise<void>;
+  saveStatus: 'saved' | 'saving' | 'unsaved';
+  
+  // Canvas operations
+  undo: () => void;
+  redo: () => void;
+  beginHistoryTransaction: () => void;
+  commitHistoryTransaction: () => void;
+  cancelHistoryTransaction: () => void;
+  saveStateWithLabel: (label?: string, eventType?: string) => void;
+  cut: () => void;
+  copy: () => void;
+  paste: () => void;
+  deleteSelected: () => void;
+  selectAll: () => void;
+  hasClipboardContent: boolean;
+  
+  // Zoom operations
+  zoomIn: () => void;
+  zoomOut: () => void;
+  zoomToFit: () => void;
+  resetZoom: () => void;
+  setCustomZoom: (value: number) => boolean;
+
+  // Alignment operations
+  alignLeft: () => void;
+  alignCenter: () => void;
+  alignRight: () => void;
+  alignTop: () => void;
+  alignMiddle: () => void;
+  alignBottom: () => void;
+
+  // Distribution operations
+  distributeHorizontally: () => void;
+  distributeVertically: () => void;
+  distributionSpacing: number | '';
+  setDistributionSpacing: (spacing: number | '') => void;
+
+  // Match dimension operations
+  matchWidth: () => void;
+  matchHeight: () => void;
+
+  // Flip operations
+  flipHorizontal: () => void;
+  flipVertical: () => void;
+  
+  // Layer operations
+  bringToFront: () => void;
+  sendToBack: () => void;
+  bringForward: () => void;
+  sendBackward: () => void;
+  
+  // Group operations
+  groupSelected: () => void;
+  ungroupSelected: () => void;
+  
+  // Export operations
+  exportAsPNG: (dpi?: 150 | 300 | 600, selectionOnly?: boolean) => void;
+  exportAsPNGTransparent: (dpi?: 150 | 300 | 600, selectionOnly?: boolean) => void;
+  exportAsJPG: (dpi?: 150 | 300 | 600, selectionOnly?: boolean) => void;
+  exportAsSVG: (selectionOnly?: boolean) => void;
+  exportAsPDF: (dpi?: 150 | 300 | 600, selectionOnly?: boolean, options?: { cmykMode?: boolean }) => void;
+  cleanExport: () => void;
+  
+  // Recent colors
+  recentColors: string[];
+  addToRecentColors: (color: string) => void;
+  
+  // Export dialog state
+  exportDialogOpen: boolean;
+  setExportDialogOpen: (open: boolean) => void;
+  
+  // Text formatting properties
+  textFont: string;
+  setTextFont: (font: string) => void;
+  textAlign: string;
+  setTextAlign: (align: string) => void;
+  textUnderline: boolean;
+  setTextUnderline: (underline: boolean) => void;
+  textOverline: boolean;
+  setTextOverline: (overline: boolean) => void;
+  textBold: boolean;
+  setTextBold: (bold: boolean) => void;
+  textItalic: boolean;
+  setTextItalic: (italic: boolean) => void;
+  textListType: 'none' | 'bullet' | 'numbered';
+  setTextListType: (type: 'none' | 'bullet' | 'numbered') => void;
+  textSubscript: boolean;
+  setTextSubscript: (subscript: boolean) => void;
+  textSuperscript: boolean;
+  setTextSuperscript: (superscript: boolean) => void;
+  
+  // Pin/Lock operations
+  pinObject: () => void;
+  unpinObject: () => void;
+  togglePin: () => void;
+  isPinned: boolean;
+  
+  // Layer panel operations
+  getCanvasObjects: () => FabricObject[];
+  selectObjectById: (id: string) => void;
+  toggleObjectVisibility: (id: string) => void;
+  toggleObjectLock: (id: string) => void;
+  reorderObjects: (fromId: string, toId: string) => void;
+
+  // Crop operations
+  cropMode: CropMode;
+  setCropMode: (mode: CropMode) => void;
+  cropImage: (cropData: any) => void;
+  resetCrop: () => void;
+  
+  // Path smoothing
+  smoothenPath: (strength: number) => void;
+  
+  // Nudge operations
+  nudgeObject: (direction: 'up' | 'down' | 'left' | 'right', amount?: number) => void;
+  
+  // History
+  saveState: () => void;
+  
+  // Flash effect
+  flashCanvas: (type?: 'success' | 'info') => void;
+  
+  // Recovery operations
+  recoverCanvas: (recoveryData: any) => void;
+  checkForRecovery: () => { data: any; ageMinutes: number } | null;
+  
+  // Advanced shortcuts
+  duplicateSelected: () => void;
+  pasteInPlace: () => void;
+  deselectAll: () => void;
+  toggleLockSelected: () => void;
+  hideSelected: () => void;
+  showAllHidden: () => void;
+  rotateSelected: (degrees: number) => void;
+  duplicateBelow: () => void;
+  loadTemplate: (template: any) => Promise<void>;
+  
+  // Gradient operations
+  applyGradient: (config: GradientConfig, target: 'fill' | 'stroke') => void;
+  clearGradient: (target: 'fill' | 'stroke') => void;
+  
+  // Shadow operations
+  applyShadow: (config: ShadowConfig) => void;
+  clearEffects: () => void;
+
+  // Image filter operations
+  applyImageFilters: (config: ImageFilterConfig) => void;
+  getImageFilters: () => ImageFilterConfig | null;
+  clearImageFilters: () => void;
+
+  // Background removal
+  removeImageBackground: () => Promise<void>;
+  
+  // Line gradient operations
+  applyLineGradient: (config: any) => void;
+  clearLineGradient: () => void;
+
+  // Bezier edit mode
+  isBezierEditMode: boolean;
+  setIsBezierEditMode: (mode: boolean) => void;
+  bezierEditModeRef: any;
+  editingBezierPath: FabricObject | null;
+  setEditingBezierPath: (path: FabricObject | null) => void;
+  exitBezierEditMode: () => void;
+
+  // Curved line edit mode
+  isCurvedLineEditMode: boolean;
+  setIsCurvedLineEditMode: (mode: boolean) => void;
+  curvedLineEditModeRef: any;
+  editingCurvedLine: FabricObject | null;
+  setEditingCurvedLine: (line: FabricObject | null) => void;
+  exitCurvedLineEditMode: () => void;
+
+  // Leader line edit mode
+  isLeaderLineEditMode: boolean;
+  setIsLeaderLineEditMode: (mode: boolean) => void;
+  leaderLineEditModeRef: any;
+  editingLeaderLine: FabricObject | null;
+  setEditingLeaderLine: (line: FabricObject | null) => void;
+  exitLeaderLineEditMode: () => void;
+
+  // Bracket edit mode
+  isBracketEditMode: boolean;
+  setIsBracketEditMode: (mode: boolean) => void;
+  bracketEditModeRef: any;
+  editingBracket: FabricObject | null;
+  setEditingBracket: (bracket: FabricObject | null) => void;
+  exitBracketEditMode: () => void;
+
+  // Image edit mode (for masked images)
+  isImageEditMode: boolean;
+  setIsImageEditMode: (mode: boolean) => void;
+  imageEditModeRef: any;
+  editingMaskedImage: Group | null;
+  setEditingMaskedImage: (group: Group | null) => void;
+  exitImageEditMode: () => void;
+
+  // Membrane edit mode
+  isMembraneEditMode: boolean;
+  setIsMembraneEditMode: (mode: boolean) => void;
+  membraneEditModeRef: any;
+  editingMembrane: FabricObject | null;
+  setEditingMembrane: (membrane: FabricObject | null) => void;
+  exitMembraneEditMode: () => void;
+  membraneEditTab: 'line' | 'icon';
+  setMembraneEditTab: (tab: 'line' | 'icon') => void;
+
+  // Read-only mode
+  isReadOnly: boolean;
+  setIsReadOnly: (readOnly: boolean) => void;
+  loadSharedProject: (id: string) => Promise<void>;
+}
+
+const CanvasContext = createContext<CanvasContextType | undefined>(undefined);
+
+export const useCanvas = () => {
+  const context = useContext(CanvasContext);
+  if (!context) {
+    throw new Error("useCanvas must be used within a CanvasProvider");
+  }
+  return context;
+};
+
+interface CanvasProviderProps {
+  children: ReactNode;
+  initialReadOnly?: boolean;
+}
+
+export const CanvasProvider = ({ children, initialReadOnly = false }: CanvasProviderProps) => {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [canvas, setCanvas] = useState<FabricCanvas | null>(null);
+  const [selectedObject, setSelectedObject] = useState<FabricObject | null>(null);
+  
+  type ClipboardJSON = { type: 'single', object: any } | { type: 'multiple', objects: any[] };
+  const [clipboard, setClipboard] = useState<ClipboardJSON | null>(null);
+
+  const [zoom, setZoom] = useState(100);
+  const [backgroundColor, setBackgroundColor] = useState("#ffffff");
+  const [backgroundGradient, setBackgroundGradient] = useState(false);
+  const [gradientStartColor, setGradientStartColor] = useState("#f0f9ff");
+  const [gradientEndColor, setGradientEndColor] = useState("#ffffff");
+  const [gradientType, setGradientType] = useState<'linear' | 'radial'>('linear');
+  const [gradientAngle, setGradientAngle] = useState(90);
+  const [gradientCenterX, setGradientCenterX] = useState(0.5);
+  const [gradientCenterY, setGradientCenterY] = useState(0.5);
+  const [gradientRadius, setGradientRadius] = useState(100);
+  const [canvasDimensions, setCanvasDimensions] = useState({ width: 1200, height: 800 });
+  const [paperSize, setPaperSize] = useState("custom");
+  const [customDimensions, setCustomDimensions] = useState<{ width: number; height: number; unit: 'px' | 'in' | 'cm' | 'mm' }>({
+    width: 1200,
+    height: 800,
+    unit: 'px'
+  });
+  const [distributionSpacing, setDistributionSpacing] = useState<number | ''>('');
+  
+  // New differential history manager for better performance
+  const historyManager = useRef<HistoryManager>(new HistoryManager(20));
+  const [historyStep, setHistoryStep] = useState(0);
+  
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [projectOwnerId, setProjectOwnerId] = useState<string | null>(null);
+  const [projectName, setProjectName] = useState("Untitled Diagram");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingProject, setIsLoadingProject] = useState(false);
+  const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
+  const [iconLoadingProgress, setIconLoadingProgress] = useState<{ current: number; total: number } | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+
+  // Counter to trigger re-render of rulers/grid after project load
+  const [canvasLoadVersion, setCanvasLoadVersion] = useState(0);
+  
+  // Performance optimization: track if canvas has unsaved changes
+  const [isDirty, setIsDirty] = useState(false);
+
+  // Track if we're currently loading a project to prevent auto-save during initialization
+  const isLoadingProjectRef = useRef(false);
+
+  // Track last activity time for smart auto-save
+  const lastActivityTimeRef = useRef(Date.now());
+
+  // Render scheduler for batching renders
+  const renderScheduler = useRef<RenderScheduler | null>(null);
+
+  // Track first selected object for match width/height operations
+  const firstSelectedObjectRef = useRef<FabricObject | null>(null);
+
+  useEffect(() => {
+    if (canvas) {
+      renderScheduler.current = new RenderScheduler(canvas);
+    }
+  }, [canvas]);
+  
+  // Recent colors state (persisted to localStorage)
+  const [recentColors, setRecentColors] = useState<string[]>(() => {
+    const stored = localStorage.getItem('canvas_recent_colors');
+    return stored ? JSON.parse(stored) : [];
+  });
+  
+  // Text formatting state
+  const [textFont, setTextFont] = useState("Inter");
+  const [textAlign, setTextAlign] = useState("left");
+  const [textUnderline, setTextUnderline] = useState(false);
+  const [textOverline, setTextOverline] = useState(false);
+  const [textBold, setTextBold] = useState(false);
+  const [textItalic, setTextItalic] = useState(false);
+  const [textListType, setTextListType] = useState<'none' | 'bullet' | 'numbered'>('none');
+  const [textSubscript, setTextSubscript] = useState(false);
+  const [textSuperscript, setTextSuperscript] = useState(false);
+  
+  // Pin state
+  const [isPinned, setIsPinned] = useState(false);
+  
+  // Crop state
+  const [cropMode, setCropMode] = useState<CropMode>('none');
+  
+  // Export dialog state
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+
+  // Read-only mode state
+  const [isReadOnly, setIsReadOnly] = useState(initialReadOnly);
+
+  // Keep isReadOnly in sync with prop changes
+  useEffect(() => {
+    setIsReadOnly(initialReadOnly);
+  }, [initialReadOnly]);
+
+  // Bezier edit mode state
+  const [isBezierEditMode, setIsBezierEditMode] = useState(false);
+  const [editingBezierPath, setEditingBezierPath] = useState<FabricObject | null>(null);
+  const bezierEditModeRef = useRef<any>(null);
+
+  // Curved line edit mode state
+  const [isCurvedLineEditMode, setIsCurvedLineEditMode] = useState(false);
+  const [editingCurvedLine, setEditingCurvedLine] = useState<FabricObject | null>(null);
+  const curvedLineEditModeRef = useRef<any>(null);
+
+  // Image edit mode state (for masked images)
+  const [isImageEditMode, setIsImageEditMode] = useState(false);
+  const [editingMaskedImage, setEditingMaskedImage] = useState<Group | null>(null);
+  const imageEditModeRef = useRef<Group | null>(null);
+
+  // Membrane edit mode state
+  const [isMembraneEditMode, setIsMembraneEditMode] = useState(false);
+  const [editingMembrane, setEditingMembrane] = useState<FabricObject | null>(null);
+  const [membraneEditTab, setMembraneEditTab] = useState<'line' | 'icon'>('line');
+  const membraneEditModeRef = useRef<any>(null);
+
+  // History management with differential compression
+  // Use ref to avoid stale closures when passed to child components
+  const canvasRef = useRef<FabricCanvas | null>(null);
+  const isPerformingHistoryOperation = useRef(false);
+  const initialStateSaved = useRef(false);
+
+  useEffect(() => {
+    canvasRef.current = canvas;
+  }, [canvas]);
+
+  const saveState = useCallback(() => {
+    const currentCanvas = canvasRef.current;
+
+    // Don't save state during undo/redo operations
+    if (isPerformingHistoryOperation.current) {
+      return;
+    }
+
+    if (!currentCanvas) return;
+
+    // Don't save state if any object is in edit mode
+    const hasObjectInEditMode = currentCanvas.getObjects().some((obj: any) => obj.isEditMode === true);
+    if (hasObjectInEditMode) {
+      return;
+    }
+    historyManager.current.saveState(currentCanvas);
+    setHistoryStep(historyManager.current.getCurrentStep());
+    setSaveStatus('unsaved');
+    setIsDirty(true);
+  }, []); // No dependencies - uses ref instead
+  
+  // Throttled version of saveState for object modifications
+  const throttledSaveState = useMemo(
+    () => throttle(saveState, 500),
+    [saveState]
+  );
+
+  const undo = useCallback(async () => {
+    if (!canvas) return;
+
+    // If we're in edit mode, reload current state to discard edits instead of going back in history
+    const wasInEditMode = isBezierEditMode || isCurvedLineEditMode || isImageEditMode || isMembraneEditMode;
+    if (wasInEditMode) {
+
+      // Deactivate edit modes to clean up handles properly
+      // Pass skipSave=true since we're discarding edits via undo
+      if (isBezierEditMode && bezierEditModeRef.current) {
+
+        bezierEditModeRef.current.deactivate(true);
+        setIsBezierEditMode(false);
+        setEditingBezierPath(null);
+      }
+      if (isCurvedLineEditMode && curvedLineEditModeRef.current) {
+
+        curvedLineEditModeRef.current.deactivate(true);
+        setIsCurvedLineEditMode(false);
+        setEditingCurvedLine(null);
+      }
+      if (isImageEditMode) {
+        setIsImageEditMode(false);
+        setEditingMaskedImage(null);
+      }
+      if (isMembraneEditMode && membraneEditModeRef.current) {
+
+        const newMembraneGroup = await membraneEditModeRef.current.deactivate();
+        setIsMembraneEditMode(false);
+        if (newMembraneGroup) {
+          setEditingMembrane(newMembraneGroup);
+        } else {
+          setEditingMembrane(null);
+        }
+      }
+
+      // Set flag to prevent saveState during restore
+      isPerformingHistoryOperation.current = true;
+
+      try {
+        // Reload current state to discard in-memory edits without moving back in history
+        const currentStep = historyManager.current.getCurrentStep();
+
+        await historyManager.current.restoreState(canvas, currentStep);
+
+        // Extra cleanup: Remove any lingering edit mode handles
+        const editModeHandles = canvas.getObjects().filter((obj: any) =>
+          obj.isAnchorHandle || obj.isControlHandle || obj.isGuideLine || obj.isHandleLine || obj.excludeFromExport
+        );
+
+        editModeHandles.forEach(obj => canvas.remove(obj));
+
+        // Clear the refs to prevent stale references
+        if (bezierEditModeRef.current) {
+          bezierEditModeRef.current.path = null;
+        }
+        if (curvedLineEditModeRef.current) {
+          curvedLineEditModeRef.current.line = null;
+        }
+
+        reloadCanvasImagesWithCORS(canvas);
+        renderScheduler.current?.scheduleRender();
+        setHistoryStep(historyManager.current.getCurrentStep());
+      } finally {
+        // Always clear the flag
+        isPerformingHistoryOperation.current = false;
+      }
+      return;
+    }
+
+    // Not in edit mode - perform normal undo
+
+    // Set flag to prevent saveState during undo
+    isPerformingHistoryOperation.current = true;
+
+    try {
+
+      const success = await historyManager.current.undo(canvas);
+
+      if (success) {
+
+        // Extra cleanup: Remove any lingering edit mode handles
+        const editModeHandles = canvas.getObjects().filter((obj: any) =>
+          obj.isAnchorHandle || obj.isControlHandle || obj.isGuideLine || obj.isHandleLine || obj.excludeFromExport
+        );
+
+        editModeHandles.forEach(obj => canvas.remove(obj));
+
+        // Clear the refs to prevent stale references
+        if (bezierEditModeRef.current) {
+          bezierEditModeRef.current.path = null;
+        }
+        if (curvedLineEditModeRef.current) {
+          curvedLineEditModeRef.current.line = null;
+        }
+
+        reloadCanvasImagesWithCORS(canvas);
+        renderScheduler.current?.scheduleRender();
+        setHistoryStep(historyManager.current.getCurrentStep());
+      }
+    } finally {
+      // Always clear the flag
+      isPerformingHistoryOperation.current = false;
+    }
+  }, [canvas, isBezierEditMode, isCurvedLineEditMode, isImageEditMode, isMembraneEditMode]);
+
+  const redo = useCallback(async () => {
+    if (!canvas) return;
+
+    // If we're in edit mode, deactivate it first to clean up handles
+    const wasInEditMode = isBezierEditMode || isCurvedLineEditMode || isImageEditMode || isMembraneEditMode;
+    if (wasInEditMode) {
+      // Deactivate edit modes to clean up handles properly
+      if (isBezierEditMode && bezierEditModeRef.current) {
+        bezierEditModeRef.current.deactivate();
+        setIsBezierEditMode(false);
+        setEditingBezierPath(null);
+      }
+      if (isCurvedLineEditMode && curvedLineEditModeRef.current) {
+        curvedLineEditModeRef.current.deactivate();
+        setIsCurvedLineEditMode(false);
+        setEditingCurvedLine(null);
+      }
+      if (isImageEditMode) {
+        setIsImageEditMode(false);
+        setEditingMaskedImage(null);
+      }
+      if (isMembraneEditMode && membraneEditModeRef.current) {
+        const newMembraneGroup = await membraneEditModeRef.current.deactivate();
+        setIsMembraneEditMode(false);
+        if (newMembraneGroup) {
+          setEditingMembrane(newMembraneGroup);
+        } else {
+          setEditingMembrane(null);
+        }
+      }
+    }
+
+    // Set flag to prevent saveState during redo
+    isPerformingHistoryOperation.current = true;
+
+    try {
+      const success = await historyManager.current.redo(canvas);
+
+      if (success) {
+        // Clear the refs to prevent stale references
+        if (bezierEditModeRef.current) {
+          bezierEditModeRef.current.path = null;
+        }
+        if (curvedLineEditModeRef.current) {
+          curvedLineEditModeRef.current.line = null;
+        }
+
+        reloadCanvasImagesWithCORS(canvas);
+        renderScheduler.current?.scheduleRender();
+        setHistoryStep(historyManager.current.getCurrentStep());
+      }
+    } finally {
+      // Always clear the flag
+      isPerformingHistoryOperation.current = false;
+    }
+  }, [canvas, isBezierEditMode, isCurvedLineEditMode, isImageEditMode, isMembraneEditMode]);
+
+  const beginHistoryTransaction = useCallback(() => {
+    if (!canvas) return;
+    historyManager.current.beginTransaction();
+  }, [canvas]);
+
+  const commitHistoryTransaction = useCallback(() => {
+    if (!canvas) return;
+    historyManager.current.commitTransaction(canvas);
+    setHistoryStep(historyManager.current.getCurrentStep());
+    setSaveStatus('unsaved');
+    setIsDirty(true);
+  }, [canvas]);
+
+  const cancelHistoryTransaction = useCallback(() => {
+    if (!canvas) return;
+    historyManager.current.cancelTransaction();
+    setHistoryStep(historyManager.current.getCurrentStep());
+  }, [canvas]);
+
+  const saveStateWithLabel = useCallback((label?: string, eventType?: string) => {
+    if (!canvas) return;
+    historyManager.current.saveState(canvas, label, eventType);
+    setHistoryStep(historyManager.current.getCurrentStep());
+    setSaveStatus('unsaved');
+    setIsDirty(true);
+  }, [canvas]);
+
+  // Clipboard operations
+  const cut = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (!activeObject) return;
+
+    try {
+      if (activeObject.type === 'activeSelection') {
+        const selection = activeObject as ActiveSelection;
+        const objects = selection.getObjects().filter(obj => 
+          !(obj as any).isGridLine && !(obj as any).isRuler
+        );
+        const jsons = objects.map(serializeObject);
+        setClipboard({ type: 'multiple', objects: jsons });
+        
+        // Remove all objects from the selection
+        objects.forEach(obj => {
+          canvas.remove(obj);
+        });
+        
+        canvas.discardActiveObject();
+        toast.success(`${jsons.length} objects cut`);
+      } else {
+        const json = serializeObject(activeObject);
+        setClipboard({ type: 'single', object: json });
+        canvas.remove(activeObject);
+        canvas.discardActiveObject();
+        toast.success('Object cut');
+      }
+      
+      canvas.requestRenderAll();
+      saveState();
+    } catch (error) {
+      console.error('Cut failed:', error);
+      toast.error('Failed to cut object');
+    }
+  }, [canvas, saveState]);
+
+  // Properties to include when serializing objects for copy/paste
+  const CLIPBOARD_PROPS = [
+    // Custom/meta
+    'id','name','data',
+    // Geometry/transform
+    'left','top','width','height','scaleX','scaleY','angle','flipX','flipY','skewX','skewY','originX','originY',
+    // Appearance
+    'fill','stroke','strokeWidth','strokeUniform','strokeDashArray','opacity','visible','shadow',
+    // Text
+    'text','fontFamily','fontSize','fontWeight','fontStyle','textAlign','underline','overline','linethrough','charSpacing','lineHeight','styles',
+    // Path/shape specifics
+    'rx','ry','radius','path',
+    // Image specifics
+    'src','crossOrigin','filters',
+    // Image masking
+    'isMaskedImage','maskShape','isEditingImage','cornerRadius',
+    // Image cropping
+    'cropConfig',
+    // Icon properties (for reference-based saving)
+    'iconId','isLibraryIcon','originalType',
+    // Icon styling properties (tone/tint)
+    'iconToneColor','iconToneIntensity','iconToneHue','originalColors',
+    // Membrane shape properties
+    'isMembraneShape','membraneOptions','worldBezierPoints','isClosed','isRasterizedMembrane','originalScaleX','originalScaleY','vectorObjects',
+    // Misc
+    'globalCompositeOperation','clipPath'
+  ];
+
+  // Helper to serialize object to JSON
+  const serializeObject = (obj: FabricObject) => obj.toObject(CLIPBOARD_PROPS);
+
+  // Robust wrapper around util.enlivenObjects to support both Promise and callback forms
+  const enliven = (jsons: any[]): Promise<FabricObject[]> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const maybe = (util as any).enlivenObjects(jsons, (objects: FabricObject[]) => {
+          resolve(objects);
+        });
+        if (maybe && typeof (maybe as any).then === 'function') {
+          (maybe as Promise<FabricObject[]>).then(resolve).catch(reject);
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+  };
+  // Canvas flash effect for visual feedback
+  const flashCanvas = useCallback((type: 'success' | 'info' = 'success') => {
+    if (!canvas) return;
+    
+    const wrapper = (canvas as any).wrapperEl?.parentElement;
+    if (!wrapper) return;
+    
+    const overlay = document.createElement('div');
+    overlay.className = `absolute inset-0 pointer-events-none transition-opacity duration-300`;
+    overlay.style.backgroundColor = type === 'success' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(59, 130, 246, 0.1)';
+    overlay.style.opacity = '1';
+    wrapper.style.position = 'relative';
+    wrapper.appendChild(overlay);
+    
+    setTimeout(() => {
+      overlay.style.opacity = '0';
+      setTimeout(() => overlay.remove(), 300);
+    }, 100);
+  }, [canvas]);
+
+  const copy = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (!activeObject) return;
+
+    try {
+      if (activeObject.type === 'activeSelection') {
+        const selection = activeObject as ActiveSelection;
+        const objects = selection.getObjects().filter(obj => 
+          !(obj as any).isGridLine && !(obj as any).isRuler
+        );
+        const jsons = objects.map(serializeObject);
+        setClipboard({ type: 'multiple', objects: jsons });
+        flashCanvas('info');
+        toast.success(`${jsons.length} objects copied`, { duration: 1000, className: 'animate-fade-in' });
+      } else {
+        const json = serializeObject(activeObject);
+        setClipboard({ type: 'single', object: json });
+        flashCanvas('info');
+        toast.success('Object copied', { duration: 1000, className: 'animate-fade-in' });
+      }
+    } catch (error) {
+      console.error('Copy failed:', error);
+      toast.error('Failed to copy object');
+    }
+  }, [canvas, flashCanvas]);
+
+  const paste = useCallback(async () => {
+    if (!canvas || !clipboard) return;
+
+    try {
+      if (clipboard.type === 'multiple') {
+        const objects = await enliven(clipboard.objects);
+        const pasted: FabricObject[] = [];
+        objects.forEach(obj => {
+          obj.set({
+            left: (obj.left || 0) + 10,
+            top: (obj.top || 0) + 10,
+          });
+          obj.setCoords();
+          canvas.add(obj);
+          pasted.push(obj);
+        });
+
+        if (pasted.length > 1) {
+          const selection = new ActiveSelection(pasted, { canvas });
+          canvas.setActiveObject(selection);
+        } else if (pasted.length === 1) {
+          canvas.setActiveObject(pasted[0]);
+        }
+
+        canvas.requestRenderAll();
+        saveState();
+        flashCanvas('success');
+        toast.success(`${pasted.length} objects pasted`, { duration: 1000, className: 'animate-fade-in' });
+      } else if (clipboard.type === 'single') {
+        const [obj] = await enliven([clipboard.object]);
+        if (!obj) {
+          toast.error('Failed to paste object');
+          return;
+        }
+        obj.set({
+          left: (obj.left || 0) + 10,
+          top: (obj.top || 0) + 10,
+        });
+        obj.setCoords();
+        canvas.add(obj);
+        canvas.setActiveObject(obj);
+        canvas.requestRenderAll();
+        saveState();
+        flashCanvas('success');
+        toast.success('Object pasted', { duration: 1000, className: 'animate-fade-in' });
+      }
+    } catch (error) {
+      console.error('Paste failed:', error);
+      toast.error('Failed to paste object');
+    }
+  }, [canvas, clipboard, saveState, flashCanvas]);
+
+  const deleteSelected = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length > 0) {
+      activeObjects.forEach(obj => canvas.remove(obj));
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+      saveState();
+    }
+  }, [canvas, saveState]);
+
+  const selectAll = useCallback(() => {
+    if (!canvas) return;
+    const allObjects = canvas.getObjects().filter((obj: any) =>
+      obj.selectable !== false && !obj.isGridLine && !obj.isRuler
+    );
+    if (allObjects.length === 0) return;
+    canvas.discardActiveObject();
+    const selection = new ActiveSelection(allObjects, { canvas });
+    canvas.setActiveObject(selection);
+    canvas.requestRenderAll();
+  }, [canvas]);
+
+  // Zoom operations
+  const zoomIn = useCallback(() => {
+    if (!canvas) return;
+    const newZoom = Math.min(zoom + 10, 400);
+    setZoom(newZoom);
+  }, [canvas, zoom]);
+
+  const zoomOut = useCallback(() => {
+    if (!canvas) return;
+    const newZoom = Math.max(zoom - 10, 10);
+    setZoom(newZoom);
+  }, [canvas, zoom]);
+
+  const resetZoom = useCallback(() => {
+    if (!canvas) return;
+    setZoom(100);
+  }, [canvas]);
+
+  const setCustomZoom = useCallback((value: number) => {
+    if (!canvas || value < 10 || value > 400) return false;
+    setZoom(value);
+    return true;
+  }, [canvas]);
+
+  const zoomToFit = useCallback(() => {
+    if (!canvas) return;
+
+    // Get the base canvas dimensions (not affected by zoom)
+    const canvasWidth = canvasDimensions.width;
+    const canvasHeight = canvasDimensions.height;
+
+    // Find the ScrollArea viewport by traversing up from the canvas element
+    const canvasElement = (canvas as any).lowerCanvasEl as HTMLCanvasElement;
+    let scrollableContainer = canvasElement?.parentElement;
+
+    // Traverse up to find the scrollable container (ScrollArea viewport)
+    while (scrollableContainer && !scrollableContainer.hasAttribute('data-radix-scroll-area-viewport')) {
+      scrollableContainer = scrollableContainer.parentElement;
+    }
+
+    // Get viewport dimensions
+    const viewportWidth = scrollableContainer ? scrollableContainer.clientWidth : 800;
+    const viewportHeight = scrollableContainer ? scrollableContainer.clientHeight : 600;
+
+    // Account for the p-6 padding (1.5rem = 24px on each side = 48px total horizontal padding)
+    const horizontalPadding = 48; // 24px left + 24px right
+    const availableWidth = viewportWidth - horizontalPadding;
+
+    // Calculate zoom to fit width (prevent horizontal scrolling)
+    const scale = availableWidth / canvasWidth;
+
+    // Apply zoom (CSS transform handles the visual zoom)
+    const newZoom = Math.max(10, Math.min(400, Math.round(scale * 100)));
+    setZoom(newZoom);
+
+    toast.success("Fit to screen");
+  }, [canvas, canvasDimensions]);
+
+  // Alignment operations
+  const alignLeft = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+
+    // Get bounding boxes for all objects
+    const bounds = activeObjects.map(obj => obj.getBoundingRect());
+    const minLeft = Math.min(...bounds.map(b => b.left));
+
+    // Align each object to the leftmost edge
+    activeObjects.forEach((obj, i) => {
+      const objBounds = bounds[i];
+      const offset = minLeft - objBounds.left;
+      obj.set({ left: (obj.left || 0) + offset });
+      obj.setCoords();
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  const alignCenter = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+
+    // Get bounding boxes for all objects
+    const bounds = activeObjects.map(obj => obj.getBoundingRect());
+
+    // Calculate the center X of all selected objects
+    const minLeft = Math.min(...bounds.map(b => b.left));
+    const maxRight = Math.max(...bounds.map(b => b.left + b.width));
+    const groupCenterX = (minLeft + maxRight) / 2;
+
+    // Align each object to the group center
+    activeObjects.forEach((obj, i) => {
+      const objBounds = bounds[i];
+      const objCenterX = objBounds.left + objBounds.width / 2;
+      const offset = groupCenterX - objCenterX;
+      obj.set({ left: (obj.left || 0) + offset });
+      obj.setCoords();
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  const alignRight = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+
+    // Get bounding boxes for all objects
+    const bounds = activeObjects.map(obj => obj.getBoundingRect());
+    const maxRight = Math.max(...bounds.map(b => b.left + b.width));
+
+    // Align each object to the rightmost edge
+    activeObjects.forEach((obj, i) => {
+      const objBounds = bounds[i];
+      const objRight = objBounds.left + objBounds.width;
+      const offset = maxRight - objRight;
+      obj.set({ left: (obj.left || 0) + offset });
+      obj.setCoords();
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  const alignTop = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+
+    // Get bounding boxes for all objects
+    const bounds = activeObjects.map(obj => obj.getBoundingRect());
+    const minTop = Math.min(...bounds.map(b => b.top));
+
+    // Align each object to the topmost edge
+    activeObjects.forEach((obj, i) => {
+      const objBounds = bounds[i];
+      const offset = minTop - objBounds.top;
+      obj.set({ top: (obj.top || 0) + offset });
+      obj.setCoords();
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  const alignMiddle = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+
+    // Get bounding boxes for all objects
+    const bounds = activeObjects.map(obj => obj.getBoundingRect());
+
+    // Calculate the center Y of all selected objects
+    const minTop = Math.min(...bounds.map(b => b.top));
+    const maxBottom = Math.max(...bounds.map(b => b.top + b.height));
+    const groupCenterY = (minTop + maxBottom) / 2;
+
+    // Align each object to the group center
+    activeObjects.forEach((obj, i) => {
+      const objBounds = bounds[i];
+      const objCenterY = objBounds.top + objBounds.height / 2;
+      const offset = groupCenterY - objCenterY;
+      obj.set({ top: (obj.top || 0) + offset });
+      obj.setCoords();
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  const alignBottom = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length === 0) return;
+
+    // Get bounding boxes for all objects
+    const bounds = activeObjects.map(obj => obj.getBoundingRect());
+    const maxBottom = Math.max(...bounds.map(b => b.top + b.height));
+
+    // Align each object to the bottommost edge
+    activeObjects.forEach((obj, i) => {
+      const objBounds = bounds[i];
+      const objBottom = objBounds.top + objBounds.height;
+      const offset = maxBottom - objBottom;
+      obj.set({ top: (obj.top || 0) + offset });
+      obj.setCoords();
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  // Helper functions for distribution and match operations
+  const fabricToBoundingBox = useCallback((fabricObj: FabricObject): BoundingBox => {
+    const bounds = fabricObj.getBoundingRect();
+    return {
+      x: bounds.left,
+      y: bounds.top,
+      width: bounds.width,
+      height: bounds.height
+    };
+  }, []);
+
+  const applyBoundingBoxToFabric = useCallback((fabricObj: FabricObject, bbox: BoundingBox): void => {
+    // Get current bounds to calculate offset
+    const currentBounds = fabricObj.getBoundingRect();
+    const offsetX = (fabricObj.left || 0) - currentBounds.left;
+    const offsetY = (fabricObj.top || 0) - currentBounds.top;
+
+    // Apply new position
+    fabricObj.set({
+      left: bbox.x + offsetX,
+      top: bbox.y + offsetY,
+    });
+
+    // Apply new dimensions via scaling
+    const currentWidth = currentBounds.width;
+    const currentHeight = currentBounds.height;
+
+    if (bbox.width !== currentWidth && currentWidth > 0) {
+      const scaleX = (fabricObj.scaleX || 1) * (bbox.width / currentWidth);
+      fabricObj.set({ scaleX });
+    }
+
+    if (bbox.height !== currentHeight && currentHeight > 0) {
+      const scaleY = (fabricObj.scaleY || 1) * (bbox.height / currentHeight);
+      fabricObj.set({ scaleY });
+    }
+
+    fabricObj.setCoords();
+  }, []);
+
+  // Distribution operations
+  const distributeHorizontally = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+
+    if (activeObjects.length < 3) {
+      toast.error('Select at least 3 objects to distribute');
+      return;
+    }
+
+    const bboxes = activeObjects.map(fabricToBoundingBox);
+    const spacing = distributionSpacing === '' ? undefined : distributionSpacing;
+    const distributed = distributeHorizontallyUtil(bboxes, spacing);
+
+    activeObjects.forEach((obj, i) => {
+      applyBoundingBoxToFabric(obj, distributed[i]);
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+
+    if (spacing !== undefined) {
+      toast.success(`Distributed ${activeObjects.length} objects with ${spacing}px spacing`);
+    } else {
+      toast.success(`Distributed ${activeObjects.length} objects horizontally`);
+    }
+  }, [canvas, saveState, fabricToBoundingBox, applyBoundingBoxToFabric, distributionSpacing]);
+
+  const distributeVertically = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+
+    if (activeObjects.length < 3) {
+      toast.error('Select at least 3 objects to distribute');
+      return;
+    }
+
+    const bboxes = activeObjects.map(fabricToBoundingBox);
+    const spacing = distributionSpacing === '' ? undefined : distributionSpacing;
+    const distributed = distributeVerticallyUtil(bboxes, spacing);
+
+    activeObjects.forEach((obj, i) => {
+      applyBoundingBoxToFabric(obj, distributed[i]);
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+
+    if (spacing !== undefined) {
+      toast.success(`Distributed ${activeObjects.length} objects with ${spacing}px spacing`);
+    } else {
+      toast.success(`Distributed ${activeObjects.length} objects vertically`);
+    }
+  }, [canvas, saveState, fabricToBoundingBox, applyBoundingBoxToFabric, distributionSpacing]);
+
+  // Match dimension operations
+  const matchWidth = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+
+    if (activeObjects.length < 2) {
+      toast.error('Select at least 2 objects to match width');
+      return;
+    }
+
+    // Use first selected object (tracked in ref) as reference
+    const referenceObj = firstSelectedObjectRef.current || activeObjects[0];
+    const targetWidth = referenceObj.getBoundingRect().width;
+
+    // Filter out the reference object - only modify the others
+    const objectsToModify = activeObjects.filter(obj => obj !== referenceObj);
+
+    if (objectsToModify.length === 0) {
+      return; // Nothing to modify
+    }
+
+    const bboxes = objectsToModify.map(fabricToBoundingBox);
+    const matched = matchWidthUtil(bboxes, targetWidth);
+
+    objectsToModify.forEach((obj, i) => {
+      applyBoundingBoxToFabric(obj, matched[i]);
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+    toast.success(`Matched width of ${activeObjects.length} objects`);
+  }, [canvas, saveState, fabricToBoundingBox, applyBoundingBoxToFabric]);
+
+  const matchHeight = useCallback(() => {
+    if (!canvas) return;
+    const activeObjects = canvas.getActiveObjects();
+
+    if (activeObjects.length < 2) {
+      toast.error('Select at least 2 objects to match height');
+      return;
+    }
+
+    // Use first selected object (tracked in ref) as reference
+    const referenceObj = firstSelectedObjectRef.current || activeObjects[0];
+    const targetHeight = referenceObj.getBoundingRect().height;
+
+    // Filter out the reference object - only modify the others
+    const objectsToModify = activeObjects.filter(obj => obj !== referenceObj);
+
+    if (objectsToModify.length === 0) {
+      return; // Nothing to modify
+    }
+
+    const bboxes = objectsToModify.map(fabricToBoundingBox);
+    const matched = matchHeightUtil(bboxes, targetHeight);
+
+    objectsToModify.forEach((obj, i) => {
+      applyBoundingBoxToFabric(obj, matched[i]);
+    });
+
+    canvas.requestRenderAll();
+    saveState();
+    toast.success(`Matched height of ${activeObjects.length} objects`);
+  }, [canvas, saveState, fabricToBoundingBox, applyBoundingBoxToFabric]);
+
+  // Flip operations
+  const flipHorizontal = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (activeObject) {
+      activeObject.set({ flipX: !activeObject.flipX });
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Flipped horizontally");
+    }
+  }, [canvas, saveState]);
+
+  const flipVertical = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (activeObject) {
+      activeObject.set({ flipY: !activeObject.flipY });
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Flipped vertically");
+    }
+  }, [canvas, saveState]);
+
+  // Layer operations
+  const bringToFront = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (activeObject) {
+      canvas.bringObjectToFront(activeObject);
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Moved to front layer");
+    }
+  }, [canvas, saveState]);
+
+  const sendToBack = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (activeObject) {
+      canvas.sendObjectToBack(activeObject);
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Moved to back layer");
+    }
+  }, [canvas, saveState]);
+
+  const bringForward = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (activeObject) {
+      canvas.bringObjectForward(activeObject);
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Moved forward one layer");
+    }
+  }, [canvas, saveState]);
+
+  const sendBackward = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+    if (activeObject) {
+      canvas.sendObjectBackwards(activeObject);
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Moved backward one layer");
+    }
+  }, [canvas, saveState]);
+
+  // Group operations
+  const groupSelected = useCallback(() => {
+    if (!canvas) return;
+
+    const activeObject = canvas.getActiveObject();
+    if (!activeObject) {
+      toast.error("No objects selected");
+      return;
+    }
+
+    // Get all selected objects
+    const activeObjects = canvas.getActiveObjects();
+    if (activeObjects.length < 2) {
+      toast.error("Select at least 2 objects to group");
+      return;
+    }
+
+    // Discard the active selection
+    canvas.discardActiveObject();
+
+    // Create a new group from the selected objects
+    const group = new Group(activeObjects, {
+      canvas: canvas,
+    });
+
+    // Remove individual objects from canvas
+    activeObjects.forEach((obj: any) => {
+      canvas.remove(obj);
+    });
+
+    // Add the group to canvas
+    canvas.add(group);
+    canvas.setActiveObject(group);
+    canvas.requestRenderAll();
+    saveState();
+    toast.success("Objects grouped");
+  }, [canvas, saveState]);
+
+  const ungroupSelected = useCallback(() => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject();
+
+    if (!activeObject || activeObject.type !== 'group') {
+      toast.error("Select a group to ungroup");
+      return;
+    }
+
+    const group = activeObject as Group;
+    const items = group.getObjects().slice(); // Create a copy of the array
+    
+    // Store group's transformation properties
+    const groupLeft = group.left || 0;
+    const groupTop = group.top || 0;
+    const groupScaleX = group.scaleX || 1;
+    const groupScaleY = group.scaleY || 1;
+    const groupAngle = group.angle || 0;
+    
+    // Remove all items from the group (this properly extracts them)
+    group.removeAll();
+    
+    // Remove the now-empty group from canvas
+    canvas.remove(group);
+    
+    // Process each item to calculate its absolute position
+    const ungroupedObjects: FabricObject[] = [];
+    
+    items.forEach(item => {
+      // Get item's position relative to group center
+      const itemLeft = item.left || 0;
+      const itemTop = item.top || 0;
+      
+      // Calculate absolute position using group's transform
+      const rad = (groupAngle * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      
+      // Rotate and scale the item's position
+      const rotatedX = itemLeft * cos - itemTop * sin;
+      const rotatedY = itemLeft * sin + itemTop * cos;
+      
+      const absoluteLeft = groupLeft + rotatedX * groupScaleX;
+      const absoluteTop = groupTop + rotatedY * groupScaleY;
+      
+      // Set absolute properties on the item
+      item.set({
+        left: absoluteLeft,
+        top: absoluteTop,
+        angle: (item.angle || 0) + groupAngle,
+        scaleX: (item.scaleX || 1) * groupScaleX,
+        scaleY: (item.scaleY || 1) * groupScaleY,
+      });
+      
+      item.setCoords();
+      ungroupedObjects.push(item);
+    });
+    
+    // Add all objects back to canvas
+    ungroupedObjects.forEach(obj => canvas.add(obj));
+    
+    // Create an active selection with all ungrouped objects
+    if (ungroupedObjects.length > 0) {
+      const selection = new ActiveSelection(ungroupedObjects, { canvas });
+      canvas.setActiveObject(selection);
+    }
+    
+    canvas.requestRenderAll();
+    saveState();
+    toast.success("Group ungrouped");
+  }, [canvas, saveState]);
+
+  // Add to recent colors with localStorage persistence
+  const addToRecentColors = useCallback((color: string) => {
+    setRecentColors(prev => {
+      const filtered = prev.filter(c => c.toLowerCase() !== color.toLowerCase());
+      const updated = [color, ...filtered].slice(0, 8);
+      localStorage.setItem('canvas_recent_colors', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
+  // Export operations
+  const exportAsPNG = useCallback(async (dpi: 150 | 300 | 600 = 300, selectionOnly: boolean = false) => {
+    if (!canvas) return;
+
+    const originalSelection = canvas.getActiveObject();
+    const hiddenForSelection: FabricObject[] = [];
+    const hidden: FabricObject[] = [];
+    
+    const toastId = toast.loading(`Preparing PNG export at ${dpi} DPI...`);
+
+    try {
+      // If exporting selection only, temporarily hide non-selected objects
+      if (selectionOnly && originalSelection) {
+        canvas.getObjects().forEach((obj) => {
+          if (obj !== originalSelection && obj.visible && 
+              !(obj as any).isGridLine && !(obj as any).isRuler) {
+            hiddenForSelection.push(obj);
+            obj.visible = false;
+          }
+        });
+      }
+
+      // Temporarily hide guides, previews, handles, and eraser paths
+      let controlHandleCount = 0;
+      const originalOpacities: Map<any, number> = new Map();
+      canvas.getObjects().forEach((obj) => {
+        const o: any = obj as any;
+        if (
+          o.isGridLine || o.isRuler || o.isGuideLine || o.isHandleLine || o.isPreviewLine || o.isPortIndicator || o.isFeedback || o.isControlHandle || o.isAnchorHandle || o.isEraserPath || obj.globalCompositeOperation === 'destination-out'
+        ) {
+          if (o.isControlHandle) {
+            controlHandleCount++;
+            originalOpacities.set(obj, obj.opacity || 1);
+            obj.set({ opacity: 0 });
+          } else {
+            if (obj.visible) {
+              hidden.push(obj);
+            }
+            obj.visible = false;
+          }
+        }
+      });
+      canvas.renderAll();
+
+      // Calculate multiplier based on DPI (300 is base)
+      const multiplier = dpi / 300;
+      
+      // Guard against extreme dimensions
+      const outW = (canvas.width || 0) * multiplier;
+      const outH = (canvas.height || 0) * multiplier;
+      
+      // Estimate file size
+      const estimatedPixels = outW * outH;
+      const estimatedMB = (estimatedPixels * 4) / (1024 * 1024);
+      
+      if (estimatedMB > 100) {
+        toast.dismiss(toastId);
+        toast.error(`Export size too large (${estimatedMB.toFixed(0)}MB). Try a lower DPI or smaller canvas.`);
+        return;
+      }
+      
+      if (outW > 10000 || outH > 10000) {
+        toast.dismiss(toastId);
+        toast.error('Export dimensions too large. Try a lower DPI setting.');
+        return;
+      }
+      const dataURL = canvas.toDataURL({ format: 'png', quality: 1, multiplier });
+      const filename = selectionOnly ? `selection-${dpi}dpi.png` : `diagram-${dpi}dpi.png`;
+      
+      await safeDownloadDataUrl(dataURL, filename);
+      toast.dismiss(toastId);
+      toast.success(`Exported as PNG at ${dpi} DPI`, { duration: 1500, className: 'animate-fade-in' });
+    } catch (err) {
+      toast.dismiss(toastId);
+      console.error('PNG Export failed:', {
+        error: err,
+        canvasSize: { width: canvas.width, height: canvas.height },
+        dpi,
+        multiplier: dpi / 300
+      });
+      
+      if (err instanceof Error && /tainted|cross-origin/i.test(err.message)) {
+        toast.error("Export failed due to a cross-origin image. Re-add the image via upload or a URL with CORS enabled.");
+      } else {
+        toast.error(err instanceof Error ? err.message : 'Failed to export PNG. Try a lower DPI or smaller canvas.');
+      }
+    } finally {
+      // Restore visibility
+      hidden.forEach((o) => (o.visible = true));
+      hiddenForSelection.forEach((o) => (o.visible = true));
+
+      // Restore opacity for control handles
+      originalOpacities.forEach((opacity, obj) => {
+        obj.set({ opacity });
+      });
+
+      canvas.renderAll();
+    }
+  }, [canvas]);
+
+  const exportAsPNGTransparent = useCallback(async (dpi: 150 | 300 | 600 = 300, selectionOnly: boolean = false) => {
+    if (!canvas) return;
+
+    const originalSelection = canvas.getActiveObject();
+    const hiddenForSelection: FabricObject[] = [];
+    const hidden: FabricObject[] = [];
+    const originalBg = canvas.backgroundColor;
+    
+    const toastId = toast.loading(`Preparing transparent PNG export at ${dpi} DPI...`);
+
+    try {
+      // If exporting selection only, temporarily hide non-selected objects
+      if (selectionOnly && originalSelection) {
+        canvas.getObjects().forEach((obj) => {
+          if (obj !== originalSelection && obj.visible && 
+              !(obj as any).isGridLine && !(obj as any).isRuler) {
+            hiddenForSelection.push(obj);
+            obj.visible = false;
+          }
+        });
+      }
+
+      // Temporarily hide guides, previews, handles, and eraser paths
+      const originalOpacities2: Map<any, number> = new Map();
+      canvas.getObjects().forEach((obj) => {
+        const o: any = obj as any;
+        if (o.isGridLine || o.isRuler || o.isGuideLine || o.isHandleLine || o.isPreviewLine || o.isPortIndicator || o.isFeedback || o.isControlHandle || o.isAnchorHandle || o.isEraserPath) {
+          if (o.isControlHandle) {
+            originalOpacities2.set(obj, obj.opacity || 1);
+            obj.set({ opacity: 0 });
+          } else {
+            if (obj.visible) {
+              hidden.push(obj);
+            }
+            obj.visible = false;
+          }
+        }
+      });
+
+      canvas.backgroundColor = null as any;
+      canvas.renderAll();
+
+      // Calculate multiplier based on DPI (300 is base)
+      const multiplier = dpi / 300;
+      
+      // Guard against extreme dimensions
+      const outW = (canvas.width || 0) * multiplier;
+      const outH = (canvas.height || 0) * multiplier;
+      
+      // Estimate file size
+      const estimatedPixels = outW * outH;
+      const estimatedMB = (estimatedPixels * 4) / (1024 * 1024);
+      
+      if (estimatedMB > 100) {
+        toast.dismiss(toastId);
+        toast.error(`Export size too large (${estimatedMB.toFixed(0)}MB). Try a lower DPI or smaller canvas.`);
+        return;
+      }
+      
+      if (outW > 10000 || outH > 10000) {
+        toast.dismiss(toastId);
+        toast.error('Export dimensions too large. Try a lower DPI setting.');
+        return;
+      }
+      const dataURL = canvas.toDataURL({ format: 'png', quality: 1, multiplier });
+      const filename = selectionOnly ? `selection-transparent-${dpi}dpi.png` : `diagram-transparent-${dpi}dpi.png`;
+      
+      await safeDownloadDataUrl(dataURL, filename);
+      toast.dismiss(toastId);
+      toast.success(`Exported as PNG (transparent) at ${dpi} DPI`, { duration: 1500, className: 'animate-fade-in' });
+    } catch (err) {
+      toast.dismiss(toastId);
+      console.error('Transparent PNG Export failed:', {
+        error: err,
+        canvasSize: { width: canvas.width, height: canvas.height },
+        dpi,
+        multiplier: dpi / 300
+      });
+      
+      if (err instanceof Error && /tainted|cross-origin/i.test(err.message)) {
+        toast.error("Export failed due to a cross-origin image. Re-add the image via upload or a URL with CORS enabled.");
+      } else {
+        toast.error(err instanceof Error ? err.message : 'Failed to export transparent PNG. Try a lower DPI or smaller canvas.');
+      }
+    } finally {
+      // Restore background and guides
+      canvas.backgroundColor = originalBg;
+      hidden.forEach((o) => (o.visible = true));
+      hiddenForSelection.forEach((o) => (o.visible = true));
+
+      // Restore opacity for control handles
+      originalOpacities2.forEach((opacity, obj) => {
+        obj.set({ opacity });
+      });
+
+      canvas.renderAll();
+    }
+  }, [canvas]);
+
+  const exportAsJPG = useCallback(async (dpi: 150 | 300 | 600 = 300, selectionOnly: boolean = false) => {
+    if (!canvas) return;
+
+    const originalSelection = canvas.getActiveObject();
+    const hiddenForSelection: FabricObject[] = [];
+    const hidden: FabricObject[] = [];
+    
+    const toastId = toast.loading(`Preparing JPG export at ${dpi} DPI...`);
+
+    try {
+      // If exporting selection only, temporarily hide non-selected objects
+      if (selectionOnly && originalSelection) {
+        canvas.getObjects().forEach((obj) => {
+          if (obj !== originalSelection && obj.visible && 
+              !(obj as any).isGridLine && !(obj as any).isRuler) {
+            hiddenForSelection.push(obj);
+            obj.visible = false;
+          }
+        });
+      }
+
+      // Temporarily hide guides, previews, handles, and eraser paths
+      const originalOpacities3: Map<any, number> = new Map();
+      canvas.getObjects().forEach((obj) => {
+        const o: any = obj as any;
+        if (o.isGridLine || o.isRuler || o.isGuideLine || o.isHandleLine || o.isPreviewLine || o.isPortIndicator || o.isFeedback || o.isControlHandle || o.isAnchorHandle || o.isEraserPath) {
+          if (o.isControlHandle) {
+            originalOpacities3.set(obj, obj.opacity || 1);
+            obj.set({ opacity: 0 });
+          } else {
+            if (obj.visible) {
+              hidden.push(obj);
+            }
+            obj.visible = false;
+          }
+        }
+      });
+      canvas.renderAll();
+
+      // Calculate multiplier based on DPI (300 is base)
+      const multiplier = dpi / 300;
+
+      // Guard against extreme dimensions
+      const outW = (canvas.width || 0) * multiplier;
+      const outH = (canvas.height || 0) * multiplier;
+
+      // Estimate file size
+      const estimatedPixels = outW * outH;
+      const estimatedMB = (estimatedPixels * 0.5) / (1024 * 1024); // JPG uses ~0.5 bytes per pixel
+      
+      if (estimatedMB > 100) {
+        toast.dismiss(toastId);
+        toast.error(`Export size too large (${estimatedMB.toFixed(0)}MB). Try a lower DPI or smaller canvas.`);
+        return;
+      }
+      
+      if (outW > 10000 || outH > 10000) {
+        toast.dismiss(toastId);
+        toast.error('Export dimensions too large. Try a lower DPI setting.');
+        return;
+      }
+      const dataURL = canvas.toDataURL({ format: 'jpeg', quality: 1, multiplier });
+      const filename = selectionOnly ? `selection-${dpi}dpi.jpg` : `diagram-${dpi}dpi.jpg`;
+      
+      await safeDownloadDataUrl(dataURL, filename);
+      toast.dismiss(toastId);
+      toast.success(`Exported as JPG at ${dpi} DPI`, { duration: 1500, className: 'animate-fade-in' });
+    } catch (err) {
+      toast.dismiss(toastId);
+      console.error('JPG Export failed:', {
+        error: err,
+        canvasSize: { width: canvas.width, height: canvas.height },
+        dpi,
+        multiplier: dpi / 300
+      });
+      
+      if (err instanceof Error && /tainted|cross-origin/i.test(err.message)) {
+        toast.error("Export failed due to a cross-origin image. Re-add the image via upload or a URL with CORS enabled.");
+      } else {
+        toast.error(err instanceof Error ? err.message : 'Failed to export JPG. Try a lower DPI or smaller canvas.');
+      }
+    } finally {
+      // Restore visibility
+      hidden.forEach((o) => (o.visible = true));
+      hiddenForSelection.forEach((o) => (o.visible = true));
+
+      // Restore opacity for control handles
+      originalOpacities3.forEach((opacity, obj) => {
+        obj.set({ opacity });
+      });
+
+      canvas.renderAll();
+    }
+  }, [canvas]);
+
+  const exportAsSVG = useCallback((selectionOnly: boolean = false) => {
+    if (!canvas) return;
+
+    const originalSelection = canvas.getActiveObject();
+    
+    // If exporting selection only, temporarily hide non-selected objects
+    const hiddenForSelection: FabricObject[] = [];
+    if (selectionOnly && originalSelection) {
+      canvas.getObjects().forEach((obj) => {
+        if (obj !== originalSelection && obj.visible && 
+            !(obj as any).isGridLine && !(obj as any).isRuler) {
+          hiddenForSelection.push(obj);
+          obj.visible = false;
+        }
+      });
+    }
+
+    // Temporarily hide guides, previews, handles, and eraser paths
+    const hidden: FabricObject[] = [];
+    const originalOpacities4: Map<any, number> = new Map();
+    canvas.getObjects().forEach((obj) => {
+      const o: any = obj as any;
+      if (o.isGridLine || o.isRuler || o.isGuideLine || o.isHandleLine || o.isPreviewLine || o.isPortIndicator || o.isFeedback || o.isControlHandle || o.isAnchorHandle || o.isEraserPath) {
+        if (o.isControlHandle) {
+          originalOpacities4.set(obj, obj.opacity || 1);
+          obj.set({ opacity: 0 });
+        } else {
+          if (obj.visible) {
+            hidden.push(obj);
+          }
+          obj.visible = false;
+        }
+      }
+    });
+    canvas.renderAll();
+
+    const svg = canvas.toSVG();
+
+    // Restore visibility
+    hidden.forEach((o) => (o.visible = true));
+    hiddenForSelection.forEach((o) => (o.visible = true));
+
+    // Restore opacity for control handles
+    originalOpacities4.forEach((opacity, obj) => {
+      obj.set({ opacity });
+    });
+
+    canvas.renderAll();
+
+    const blob = new Blob([svg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = selectionOnly ? 'selection.svg' : 'diagram.svg';
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported as SVG`, { duration: 1500, className: 'animate-fade-in' });
+  }, [canvas]);
+
+  // Export as PDF
+  const exportAsPDF = useCallback(async (
+    dpi: 150 | 300 | 600 = 300,
+    selectionOnly: boolean = false,
+    options?: { cmykMode?: boolean }
+  ) => {
+    if (!canvas) return;
+
+    try {
+      // Memory check
+      const width = canvas.width || 800;
+      const height = canvas.height || 600;
+      const maxDimension = Math.max(width, height);
+
+      if (maxDimension > 5000) {
+        toast.warning('Large canvas detected. PDF export may take longer...');
+      }
+
+      const originalSelection = canvas.getActiveObject();
+
+      // If exporting selection only, temporarily hide non-selected objects
+      const hiddenForSelection: FabricObject[] = [];
+      if (selectionOnly && originalSelection) {
+        canvas.getObjects().forEach((obj) => {
+          if (obj !== originalSelection && obj.visible &&
+              !(obj as any).isGridLine && !(obj as any).isRuler) {
+            hiddenForSelection.push(obj);
+            obj.visible = false;
+          }
+        });
+      }
+
+      // Temporarily hide guides, previews, handles, and eraser paths
+      const hidden: FabricObject[] = [];
+      const originalOpacities: Map<any, number> = new Map();
+      canvas.getObjects().forEach((obj) => {
+        const o: any = obj as any;
+        if (o.isGridLine || o.isRuler || o.isGuideLine || o.isHandleLine ||
+            o.isPreviewLine || o.isPortIndicator || o.isFeedback ||
+            o.isControlHandle || o.isAnchorHandle || o.isEraserPath) {
+          if (o.isControlHandle) {
+            originalOpacities.set(obj, obj.opacity || 1);
+            obj.set({ opacity: 0 });
+          } else {
+            if (obj.visible) {
+              hidden.push(obj);
+            }
+            obj.visible = false;
+          }
+        }
+      });
+      canvas.renderAll();
+
+      // Generate SVG
+      const svgString = canvas.toSVG();
+
+      // Parse SVG to DOM
+      const parser = new DOMParser();
+      const svgDoc = parser.parseFromString(svgString, 'image/svg+xml');
+      const svgElement = svgDoc.documentElement as unknown as SVGSVGElement;
+
+      // Apply CMYK conversion if enabled
+      // This actually modifies the SVG colors to simulate CMYK print gamut
+      if (options?.cmykMode) {
+        const warnings = validateSVGForCMYK(svgElement);
+        if (warnings.length > 0) {
+          
+          toast.warning(warnings[0], { duration: 3000 });
+        }
+        const colorMap = applyCMYKConversion(svgElement);
+        toast.success(`CMYK conversion applied (${colorMap.size} colors)`, { duration: 2000 });
+      }
+
+      // For vector PDFs, use canvas dimensions directly as points
+      // 72 points = 1 inch, so an 800px canvas = ~11 inch PDF
+      // This creates a full-size, print-ready PDF
+      const pdfWidth = width;
+      const pdfHeight = height;
+
+      // Create jsPDF document
+      const pdf = new jsPDF({
+        orientation: width > height ? 'landscape' : 'portrait',
+        unit: 'pt',
+        format: [pdfWidth, pdfHeight]
+      });
+
+      // Convert SVG to PDF
+      await svg2pdf(svgElement, pdf, {
+        x: 0,
+        y: 0,
+        width: pdfWidth,
+        height: pdfHeight,
+      });
+
+      // Generate and download PDF
+      const pdfBlob = pdf.output('blob');
+      const url = URL.createObjectURL(pdfBlob);
+      const link = document.createElement('a');
+      const filename = selectionOnly ? `selection-${dpi}dpi.pdf` : `diagram-${dpi}dpi.pdf`;
+      link.download = filename;
+      link.href = url;
+      link.click();
+      URL.revokeObjectURL(url);
+
+      // Restore visibility
+      hidden.forEach((o) => (o.visible = true));
+      hiddenForSelection.forEach((o) => (o.visible = true));
+
+      // Restore opacity for control handles
+      originalOpacities.forEach((opacity, obj) => {
+        obj.set({ opacity });
+      });
+
+      canvas.renderAll();
+
+      toast.success(`Exported as PDF`, { duration: 1500, className: 'animate-fade-in' });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      toast.error('Failed to export PDF. Please try again.');
+
+      // Ensure visibility is restored even on error
+      if (canvas) {
+        canvas.getObjects().forEach((obj) => {
+          obj.visible = true;
+          obj.set({ opacity: 1 });
+        });
+        canvas.renderAll();
+      }
+    }
+  }, [canvas]);
+
+  // Clean Export - One-click optimal export with transparent background
+  const cleanExport = useCallback(() => {
+    exportAsPNGTransparent(300, false);
+  }, [exportAsPNGTransparent]);
+
+  // Pin/Lock operations
+  const pinObject = useCallback(() => {
+    if (!canvas || !selectedObject) return;
+    
+    selectedObject.set({
+      lockMovementX: true,
+      lockMovementY: true,
+      lockRotation: true,
+      lockScalingX: true,
+      lockScalingY: true,
+      hasControls: false,
+      hasBorders: true,
+      selectable: true,
+    });
+    (selectedObject as any).isPinned = true;
+    setIsPinned(true);
+    canvas.renderAll();
+    toast.success("Object pinned");
+  }, [canvas, selectedObject]);
+
+  const unpinObject = useCallback(() => {
+    if (!canvas || !selectedObject) return;
+    
+    selectedObject.set({
+      lockMovementX: false,
+      lockMovementY: false,
+      lockRotation: false,
+      lockScalingX: false,
+      lockScalingY: false,
+      hasControls: true,
+      hasBorders: true,
+      selectable: true,
+    });
+    (selectedObject as any).isPinned = false;
+    setIsPinned(false);
+    canvas.renderAll();
+    toast.success("Object unpinned");
+  }, [canvas, selectedObject]);
+
+  const togglePin = useCallback(() => {
+    if (isPinned) {
+      unpinObject();
+    } else {
+      pinObject();
+    }
+  }, [isPinned, pinObject, unpinObject]);
+
+  // Update isPinned state when selectedObject changes
+  useEffect(() => {
+    if (selectedObject) {
+      setIsPinned((selectedObject as any).isPinned || false);
+    } else {
+      setIsPinned(false);
+    }
+  }, [selectedObject]);
+
+  // Layer panel operations
+  const getCanvasObjects = useCallback(() => {
+    if (!canvas) return [];
+    return canvas.getObjects().filter(obj => 
+      !(obj as any).isGridLine && 
+      !(obj as any).isRuler && 
+      !(obj as any).isEraserPath
+    );
+  }, [canvas]);
+
+  const selectObjectById = useCallback((id: string) => {
+    if (!canvas) return;
+    const objects = getCanvasObjects();
+    const targetObject = objects.find(obj => (obj as any).uuid === id || obj === objects[parseInt(id)]);
+    if (targetObject) {
+      // Don't select hidden objects - they should remain hidden
+      if (targetObject.visible === false) {
+        return;
+      }
+      canvas.setActiveObject(targetObject);
+      canvas.renderAll();
+    }
+  }, [canvas, getCanvasObjects]);
+
+  const toggleObjectVisibility = useCallback((id: string) => {
+    if (!canvas) return;
+
+    const objects = getCanvasObjects();
+    const targetObject = objects.find(obj =>
+      (obj as any).uuid === id ||
+      obj === objects[parseInt(id)]
+    );
+
+    if (targetObject) {
+      const newVisibility = !targetObject.visible;
+
+      // If hiding the currently selected object, deselect it FIRST
+      // (deselecting after hiding resets visibility)
+      if (!newVisibility && canvas.getActiveObject() === targetObject) {
+        canvas.discardActiveObject();
+      }
+
+      // Set visibility and selectable (hidden objects shouldn't be selectable)
+      targetObject.set({
+        visible: newVisibility,
+        selectable: newVisibility,
+        evented: newVisibility
+      });
+      targetObject.setCoords();
+
+      // Fire event BEFORE requestRenderAll to ensure layers panel updates
+      canvas.fire('layer:visibility:changed', { target: targetObject });
+      canvas.requestRenderAll();
+
+      toast.success(newVisibility ? "Object shown" : "Object hidden");
+    }
+  }, [canvas, getCanvasObjects]);
+
+  const toggleObjectLock = useCallback((id: string) => {
+    if (!canvas) return;
+
+    const objects = getCanvasObjects();
+    const targetObject = objects.find(obj =>
+      (obj as any).uuid === id ||
+      obj === objects[parseInt(id)]
+    );
+
+    if (targetObject) {
+      const isCurrentlyLocked = targetObject.lockMovementX || false;
+      const newLockState = !isCurrentlyLocked;
+
+      targetObject.set({
+        lockMovementX: newLockState,
+        lockMovementY: newLockState,
+        lockRotation: newLockState,
+        lockScalingX: newLockState,
+        lockScalingY: newLockState,
+        hasControls: !newLockState, // Hide transform controls when locked
+      });
+
+      targetObject.setCoords();
+
+      // Use custom event to avoid triggering history
+      canvas.fire('layer:lock:changed', { target: targetObject });
+      canvas.requestRenderAll();
+
+      toast.success(newLockState ? "Object locked" : "Object unlocked");
+    }
+  }, [canvas, getCanvasObjects]);
+
+  const reorderObjects = useCallback((fromId: string, toId: string) => {
+    if (!canvas) return;
+
+    const userObjects = getCanvasObjects();
+
+    // Find objects by UUID or by index (as fallback)
+    const fromObject = userObjects.find(obj =>
+      (obj as any).uuid === fromId || obj === userObjects[parseInt(fromId)]
+    );
+    const toObject = userObjects.find(obj =>
+      (obj as any).uuid === toId || obj === userObjects[parseInt(toId)]
+    );
+
+    if (!fromObject || !toObject) return;
+
+    // Get all canvas objects (including grid, rulers, etc.)
+    const allObjects = canvas.getObjects();
+    const fromIndex = allObjects.indexOf(fromObject);
+    const toIndex = allObjects.indexOf(toObject);
+
+    if (fromIndex === -1 || toIndex === -1) return;
+
+    // Temporarily suppress canvas events to prevent history saves during reorder
+    const originalFireEvent = canvas.fire;
+    const suppressedEvents = new Set(['object:added', 'object:removed', 'object:modified']);
+
+    canvas.fire = function(eventName: string, options?: any) {
+      if (suppressedEvents.has(eventName)) {
+        return originalFireEvent.call(this, 'event:suppressed', { originalEvent: eventName, ...options });
+      }
+      return originalFireEvent.call(this, eventName, options);
+    } as any;
+
+    try {
+      // Remove the object from its current position
+      canvas.remove(fromObject);
+
+      // Adjust the target index based on whether we're moving up or down
+      // If moving from lower index to higher index, toIndex shifts down by 1 after removal
+      const adjustedIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
+
+      // Insert at the new position
+      canvas.insertAt(adjustedIndex, fromObject);
+    } finally {
+      // Restore original fire function
+      canvas.fire = originalFireEvent;
+    }
+
+    // Render the canvas to show the reordered objects
+    canvas.requestRenderAll();
+  }, [canvas, getCanvasObjects]);
+
+  // Crop operation
+  const cropImage = useCallback((cropData: any) => {
+    if (!canvas || !selectedObject) return;
+
+    // Support both image and group types (groups are SVG icons)
+    const supportedTypes = ['image', 'group'];
+    if (!supportedTypes.includes(selectedObject.type)) {
+      toast.error("Please select an image or icon to crop");
+      return;
+    }
+
+    const object = selectedObject as any;
+    const { mode, rect, isCircular, polygonPoints } = cropData;
+
+    // Store original dimensions on first crop
+    if (!object.cropConfig) {
+      object.originalWidth = object.width || 0;
+      object.originalHeight = object.height || 0;
+      object.originalScaleX = object.scaleX || 1;
+      object.originalScaleY = object.scaleY || 1;
+    }
+
+    // Clear any existing clipPath before applying new crop
+    if (object.clipPath) {
+      object.set({ clipPath: null });
+    }
+
+    // Get object properties
+    const scaleX = object.scaleX || 1;
+    const scaleY = object.scaleY || 1;
+    const matrix = object.calcTransformMatrix();
+    const invertedMatrix = util.invertTransform(matrix);
+
+    let clipPath;
+    let clipPathType: 'rect' | 'circle' | 'polygon';
+
+    if (mode === 'freeform' && polygonPoints) {
+      // Free-form polygon crop
+      const localPoints = polygonPoints.map((pt: { x: number; y: number }) =>
+        util.transformPoint(pt, invertedMatrix)
+      );
+
+      clipPath = new Polygon(localPoints, {
+        originX: 'left',
+        originY: 'top',
+        absolutePositioned: false
+      });
+      clipPathType = 'polygon';
+    } else if (mode === 'circle' || mode === 'ellipse' || isCircular) {
+      // Circular or elliptical crop
+      const canvasCenter = {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+      const localCenter = util.transformPoint(canvasCenter, invertedMatrix);
+
+      // For circle mode, use equal radius. For ellipse, use different radii
+      let radiusX, radiusY;
+      if (mode === 'circle') {
+        const radius = Math.min(rect.width, rect.height) / 2 / Math.min(scaleX, scaleY);
+        radiusX = radius;
+        radiusY = radius;
+      } else {
+        radiusX = (rect.width / 2) / scaleX;
+        radiusY = (rect.height / 2) / scaleY;
+      }
+
+      clipPath = new Circle({
+        left: localCenter.x,
+        top: localCenter.y,
+        radius: radiusX,
+        originX: 'center',
+        originY: 'center'
+      });
+
+      // Apply scaling for ellipse
+      if (mode === 'ellipse' && radiusX !== radiusY) {
+        (clipPath as any).scaleY = radiusY / radiusX;
+      }
+
+      clipPathType = 'circle';
+    } else {
+      // Rectangle or square crop
+      const topLeft = util.transformPoint(
+        { x: rect.left, y: rect.top },
+        invertedMatrix
+      );
+      const bottomRight = util.transformPoint(
+        { x: rect.left + rect.width, y: rect.top + rect.height },
+        invertedMatrix
+      );
+
+      clipPath = new Rect({
+        left: topLeft.x,
+        top: topLeft.y,
+        width: bottomRight.x - topLeft.x,
+        height: bottomRight.y - topLeft.y,
+        originX: 'left',
+        originY: 'top'
+      });
+      clipPathType = 'rect';
+    }
+
+    // ClipPath is in object-local coordinates, so it moves with the object
+    (clipPath as any).inverted = false;
+
+    // Apply the clipPath to the object
+    object.set({ clipPath });
+
+    // Store crop config for non-destructive editing
+    object.cropConfig = {
+      type: mode || (isCircular ? 'circle' : 'square'),
+      clipPathData: {
+        type: clipPathType,
+        ...clipPath.toObject()
+      },
+      originalDimensions: {
+        width: object.originalWidth,
+        height: object.originalHeight,
+        scaleX: object.originalScaleX,
+        scaleY: object.originalScaleY
+      }
+    };
+
+    object.setCoords();
+    canvas.requestRenderAll();
+    saveState();
+    setCropMode('none');
+
+    const objectType = selectedObject.type === 'image' ? 'Image' : 'Icon';
+    const modeText = mode === 'freeform' ? 'free-form' :
+                     mode === 'circle' ? 'circular' :
+                     mode === 'ellipse' ? 'elliptical' :
+                     mode === 'square' ? 'square' : 'rectangular';
+    toast.success(`${objectType} cropped (${modeText})`);
+  }, [canvas, selectedObject, saveState]);
+
+  // Reset crop operation
+  const resetCrop = useCallback(() => {
+    if (!canvas || !selectedObject) return;
+
+    const imageObj = selectedObject as any;
+    const cropConfig = imageObj.cropConfig;
+
+    if (!cropConfig) {
+      toast.info('Image is not cropped');
+      return;
+    }
+
+    // Remove clipPath
+    imageObj.set({ clipPath: null });
+
+    // Restore original dimensions
+    const orig = cropConfig.originalDimensions;
+    imageObj.set({
+      width: orig.width,
+      height: orig.height,
+      scaleX: orig.scaleX,
+      scaleY: orig.scaleY
+    });
+
+    // Clear config
+    delete imageObj.cropConfig;
+
+    imageObj.setCoords();
+    canvas.requestRenderAll();
+    saveState();
+
+    toast.success('Crop reset to original');
+  }, [canvas, selectedObject, saveState]);
+
+
+  // Path smoothing operation
+  const smoothenPath = useCallback((strength: number) => {
+    if (!canvas || !selectedObject) return;
+    
+    // Check if selected object is a freeform line (Path)
+    if (selectedObject.type !== 'path' || !(selectedObject as any).isFreeformLine) {
+      toast.error("Please select a freeform line to smooth");
+      return;
+    }
+
+    const pathObj = selectedObject as Path;
+    
+    try {
+      smoothFabricPath(pathObj, strength);
+      canvas.requestRenderAll();
+      saveState();
+      toast.success("Path smoothed");
+    } catch (error) {
+      console.error('Smoothing error:', error);
+      toast.error("Failed to smooth path");
+    }
+  }, [canvas, selectedObject, saveState]);
+
+  // Nudge operation for precise object movement
+  const nudgeObject = useCallback((direction: 'up' | 'down' | 'left' | 'right', amount: number = 1) => {
+    if (!canvas) return;
+    
+    const activeObject = canvas.getActiveObject();
+    if (!activeObject) return;
+
+    // Get current position
+    const currentLeft = activeObject.left || 0;
+    const currentTop = activeObject.top || 0;
+
+    // Calculate new position based on direction
+    let newLeft = currentLeft;
+    let newTop = currentTop;
+
+    switch (direction) {
+      case 'up':
+        newTop = currentTop - amount;
+        break;
+      case 'down':
+        newTop = currentTop + amount;
+        break;
+      case 'left':
+        newLeft = currentLeft - amount;
+        break;
+      case 'right':
+        newLeft = currentLeft + amount;
+        break;
+    }
+
+    // Update object position
+    activeObject.set({
+      left: newLeft,
+      top: newTop
+    });
+
+    // Update coordinates and render
+    activeObject.setCoords();
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, saveState]);
+
+  // Project save/load operations
+  const saveProject = useCallback(async (isManualSave = false) => {
+    if (!canvas || !user) {
+      toast.error("Please sign in to save projects");
+      return;
+    }
+
+    setIsSaving(true);
+    setSaveStatus('saving');
+    try {
+      // Include custom properties when saving to database
+      const CUSTOM_PROPS = [
+        // Bezier path properties
+        'bezierPoints', 'isBezierPath', 'bezierPointsAreLocal',
+        // Curved line properties
+        'isCurvedLine', 'curvedLineStart', 'curvedLineEnd', 'curvedLineControlPoint',
+        'curvedLocalStart', 'curvedLocalEnd', 'curvedLocalControl', 'curvedLineVersion',
+        'startMarkerType', 'endMarkerType', 'markerOptions',
+        // Image mask properties
+        'isMaskedImage', 'maskShape', 'cornerRadius',
+        // Image crop properties
+        'cropConfig',
+        // Connector properties
+        'isConnector', 'connectorData', 'startConnection', 'endConnection',
+        // Line intersection properties
+        'intersectionBehavior', 'arcRadius', 'gapSize', 'bridgeWidth', 'bridgeColor',
+        // Membrane shape properties
+        'isMembraneShape', 'membraneOptions', 'worldBezierPoints', 'isClosed', 'isRasterizedMembrane', 'originalScaleX', 'originalScaleY', 'vectorObjects',
+        // Chart properties
+        'chartConfig',
+        // Icon properties (for reference-based saving)
+        'iconId', 'isLibraryIcon', 'originalType',
+        // Icon styling properties (tone/tint)
+        'iconToneColor', 'iconToneIntensity', 'iconToneHue', 'originalColors',
+        // Effects properties
+        'shadow',
+        // Other custom properties
+        'id', 'name', 'data', 'customProp', 'customType'
+      ];
+
+      // Get all objects and filter out UI elements (grids, rulers, guides, handles)
+      // These should not be saved to the database as they are recreated on load
+      const allObjects = canvas.getObjects();
+      const userObjects = allObjects.filter((obj: any) => {
+        return !obj.isGridLine &&
+               !obj.isRuler &&
+               !obj.excludeFromExport &&
+               !obj.isControlHandle &&
+               !obj.isHandleLine &&
+               !obj.isAnchorHandle &&
+               !obj.isGuideLine &&
+               !obj.isEraserPath &&
+               !obj.isPortIndicator &&
+               !obj.isFeedback;
+      });
+
+      // Serialize filtered objects with custom properties
+
+      const canvasData: any = {
+        version: '6.0.0',
+        objects: userObjects.map((obj: any, index: number) => {
+
+          const objData = obj.toObject(CUSTOM_PROPS);
+
+          const beforeSize = JSON.stringify(objData).length;
+
+          // Manually ensure all custom props are included
+
+          CUSTOM_PROPS.forEach(prop => {
+            if (obj[prop] !== undefined) {
+              objData[prop] = obj[prop];
+            }
+          });
+
+          // Convert Map to plain object for JSON serialization
+          if (obj.originalColors instanceof Map) {
+
+            objData.originalColors = Object.fromEntries(obj.originalColors);
+          }
+
+          // Helper function to recursively strip icon content from nested objects
+          const stripNestedIcons = (nestedObjects: any[]) => {
+            if (!nestedObjects || !Array.isArray(nestedObjects)) return;
+
+            nestedObjects.forEach((nestedObj: any) => {
+              if (nestedObj.iconId && nestedObj.isLibraryIcon) {
+                const nestedType = nestedObj.type;
+                // Strip SVG content from nested icon
+                if ((nestedObj.type === 'Group' || nestedObj.type === 'group') && nestedObj.objects) {
+                  delete nestedObj.objects;
+
+                } else if ((nestedObj.type === 'Path' || nestedObj.type === 'path') && nestedObj.path) {
+                  delete nestedObj.path;
+
+                } else if ((nestedObj.type === 'Image' || nestedObj.type === 'image') && nestedObj.src) {
+                  delete nestedObj.src;
+
+                }
+                nestedObj.type = 'libraryIcon';
+                nestedObj.originalType = nestedType;
+              } else if (nestedObj.objects) {
+                // Recursively process deeper nesting
+                stripNestedIcons(nestedObj.objects);
+              }
+            });
+          };
+
+          // Process rasterized membranes - they store vector data for edit mode
+          if (obj.isRasterizedMembrane) {
+
+            // Rasterized membranes store vectorObjects which may contain nested icons
+            if (objData.vectorObjects && objData.vectorObjects.objects) {
+
+              stripNestedIcons(objData.vectorObjects.objects);
+            }
+          }
+
+          // Process membrane groups - strip icons inside them
+          if (obj.isMembraneShape && objData.objects) {
+
+            stripNestedIcons(objData.objects);
+          }
+
+          // Icon-by-reference: Strip SVG content from library icons
+          // Save only iconId + transforms instead of full SVG (650 KB → 541 bytes per icon)
+          if (obj.isLibraryIcon && obj.iconId) {
+
+            const originalType = objData.type;
+
+            // Strip large data based on object type (Fabric uses capitalized type names)
+            if ((objData.type === 'Group' || objData.type === 'group') && objData.objects) {
+              const objectCount = objData.objects.length;
+              delete objData.objects; // Remove nested SVG paths/shapes
+
+            } else if ((objData.type === 'Path' || objData.type === 'path') && objData.path) {
+              delete objData.path; // Remove SVG path data
+
+            } else if ((objData.type === 'Image' || objData.type === 'image') && objData.src) {
+              delete objData.src; // Remove image data URL
+
+            }
+
+            // Mark as library icon reference
+            objData.type = 'libraryIcon';
+            objData.originalType = originalType; // Store original type for reconstruction
+
+            const afterSize = JSON.stringify(objData).length;
+
+          } else if ((objData.type === 'Group' || objData.type === 'group') && objData.objects) {
+
+          }
+
+
+          return objData;
+        }),
+        background: canvas.backgroundColor || '',
+      };
+
+
+      const totalSize = JSON.stringify(canvasData).length;
+      const totalSizeMB = (totalSize / 1024 / 1024).toFixed(2);
+
+
+      // Base data for updates (don't include user_id to preserve original owner)
+      const updateData = {
+        name: projectName,
+        canvas_data: canvasData,
+        paper_size: paperSize,
+        canvas_width: canvasDimensions.width,
+        canvas_height: canvasDimensions.height,
+        custom_unit: paperSize === 'custom' ? customDimensions.unit : 'px',
+        updated_at: new Date().toISOString()
+      };
+      
+      // Full data for inserts (includes user_id for new projects)
+      const insertData = {
+        ...updateData,
+        user_id: user.id
+      };
+
+      // Check payload size before saving
+      const payloadSize = new Blob([JSON.stringify(insertData)]).size / (1024 * 1024);
+      if (payloadSize > 4) {
+        toast.error('Project too large to save (>4MB)', {
+          description: 'Remove complex icons or reduce object count'
+        });
+        setIsSaving(false);
+        return;
+      }
+
+      if (currentProjectId) {
+        // Fetch the current project data from database for version creation
+        const { data: currentProject } = await supabase
+          .from('canvas_projects')
+          .select('canvas_data, canvas_width, canvas_height, paper_size')
+          .eq('id', currentProjectId)
+          .single();
+
+        // Check if we should create a version snapshot
+        let shouldCreateVersion = isManualSave;
+
+        if (!shouldCreateVersion && currentProject) {
+          // For auto-saves, check if changes are significant
+          shouldCreateVersion = isSignificantChange(currentProject.canvas_data, canvasData);
+        }
+
+        // Create version snapshot before updating main project
+        // Version contains the PREVIOUS state (from database), not the NEW state (current canvas)
+        if (shouldCreateVersion && currentProject) {
+          try {
+            await createVersion({
+              projectId: currentProjectId,
+              userId: user.id,
+              canvasData: currentProject.canvas_data,
+              canvasWidth: currentProject.canvas_width,
+              canvasHeight: currentProject.canvas_height,
+              paperSize: currentProject.paper_size || paperSize,
+              isAutoSave: !isManualSave,
+            });
+          } catch (versionError) {
+            console.error('Failed to create version snapshot:', versionError);
+            // Don't fail the save if version creation fails
+          }
+        }
+
+        // Update existing project (preserves original owner)
+        const { error } = await supabase
+          .from('canvas_projects')
+          .update(updateData)
+          .eq('id', currentProjectId);
+
+        if (error) throw error;
+
+        // Cleanup old versions in the background
+        cleanupVersions(currentProjectId).catch(err =>
+          console.error('Version cleanup failed:', err)
+        );
+
+        setSaveStatus('saved');
+        toast.success("Project saved", {
+          duration: 1000,
+          className: 'success-pulse animate-fade-in'
+        });
+
+        // Update URL without triggering React Router to preserve canvas state
+        if (isManualSave && !window.location.pathname.includes(currentProjectId)) {
+          window.history.replaceState({}, '', `/canvas/${currentProjectId}`);
+        }
+      } else {
+        // Create new project
+        const { data, error } = await supabase
+          .from('canvas_projects')
+          .insert([insertData])
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data) {
+          setCurrentProjectId(data.id);
+          setSaveStatus('saved');
+          toast.success("Project created and saved", {
+            duration: 1500,
+            className: 'success-pulse animate-fade-in'
+          });
+
+          // Update URL without triggering React Router to preserve canvas state
+          // This ensures users working on /canvas get the URL updated to /canvas/:id after first save
+          window.history.replaceState({}, '', `/canvas/${data.id}`);
+        }
+      }
+    } catch (error: any) {
+      console.error('Save error:', {
+        message: error.message,
+        details: error.toString(),
+        hint: error.hint,
+        code: error.code
+      });
+      
+      // Provide specific error messages
+      if (error.message?.includes('payload') || error.message?.includes('too large') || error.message?.includes('size')) {
+        toast.error('Project too large to save', {
+          description: 'Remove some complex icons and try again'
+        });
+      } else if (error.message?.includes('Failed to fetch') || error.message?.includes('fetch') || error.message?.includes('network')) {
+        toast.error('Network timeout during save', {
+          description: 'Project may be too large or connection is slow'
+        });
+      } else {
+        toast.error(error.message || "Failed to save project");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }, [canvas, user, projectName, paperSize, canvasDimensions, customDimensions.unit, currentProjectId, navigate]);
+
+  const loadProject = useCallback(async (id: string) => {
+    if (!canvas || !user) return;
+
+    // Skip if this project is already loaded
+    if (loadedProjectId === id && canvas.getObjects().length > 0) {
+
+      return;
+    }
+
+    // Set flag to prevent auto-save during project load
+    isLoadingProjectRef.current = true;
+    setIsLoadingProject(true);
+
+    try {
+      const { data, error } = await supabase
+        .from('canvas_projects')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (error) throw error;
+      if (!data) {
+        toast.error("Project not found");
+        isLoadingProjectRef.current = false;
+        setIsLoadingProject(false);
+        return;
+      }
+
+      // Wait for all fonts to load before rendering
+      toast("Loading project...");
+      await loadAllFonts();
+
+      // Load canvas data
+      const canvasData = data.canvas_data as Record<string, any>;
+
+      // Icon-by-reference: Reconstruct icons from references before loading
+      if (canvasData.objects && canvasData.objects.length > 0) {
+        const { loadSVGFromString, util } = await import('fabric');
+
+        // Helper to count all icons including nested ones in membrane groups
+        const countAllIcons = (objects: any[]): number => {
+          let count = 0;
+          objects.forEach(obj => {
+            if (obj.type === 'libraryIcon' && obj.iconId) {
+              count++;
+            }
+            // Check for nested icons in membrane groups
+            if (obj.isMembraneShape && obj.objects) {
+              count += countNestedIcons(obj.objects);
+            }
+          });
+          return count;
+        };
+
+        const countNestedIcons = (nestedObjects: any[]): number => {
+          let count = 0;
+          nestedObjects.forEach(nested => {
+            if (nested.type === 'libraryIcon' && nested.iconId) {
+              count++;
+            }
+            if (nested.objects) {
+              count += countNestedIcons(nested.objects);
+            }
+          });
+          return count;
+        };
+
+        // Helper to reconstruct a single icon
+        const reconstructIcon = async (iconObj: any) => {
+          const { data: iconData, error: iconError } = await supabase
+            .from('icons')
+            .select('svg_content, thumbnail')
+            .eq('id', iconObj.iconId)
+            .single();
+
+          if (iconError || !iconData?.svg_content) {
+            console.error(`Failed to load icon ${iconObj.iconId}:`, iconError);
+            return false;
+          }
+
+          // Parse SVG with crossOrigin set for image elements
+          const svgResult = await loadSVGFromString(iconData.svg_content, undefined, {
+            crossOrigin: 'anonymous'
+          });
+          const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+          // If this is an image icon, ensure crossOrigin is set on image objects
+          const setImageCrossOrigin = (obj: any) => {
+            if (obj.type === 'image' || obj.type === 'Image') {
+              obj.set({ crossOrigin: 'anonymous' });
+            }
+            if (obj._objects) {
+              obj._objects.forEach((child: any) => setImageCrossOrigin(child));
+            }
+          };
+          setImageCrossOrigin(tempGroup);
+
+          const originalType = iconObj.originalType || 'Group';
+          const normalizedType = originalType.toLowerCase();
+
+          if (normalizedType === 'group') {
+            const groupData = tempGroup.toObject();
+            iconObj.objects = groupData.objects;
+            iconObj.type = originalType;
+          } else if (normalizedType === 'path' && tempGroup._objects && tempGroup._objects[0]) {
+            const pathData = tempGroup._objects[0].toObject();
+            iconObj.path = pathData.path;
+            iconObj.type = originalType;
+          } else if (normalizedType === 'image') {
+            const groupData = tempGroup.toObject();
+            iconObj.objects = groupData.objects;
+            iconObj.type = originalType;
+          } else {
+            const groupData = tempGroup.toObject();
+            iconObj.objects = groupData.objects;
+            iconObj.type = 'Group';
+          }
+          return true;
+        };
+
+        // Helper to recursively reconstruct nested icons
+        const reconstructNestedIcons = async (nestedObjects: any[]): Promise<number> => {
+          let count = 0;
+          for (const nested of nestedObjects) {
+            if (nested.type === 'libraryIcon' && nested.iconId) {
+              try {
+
+                await reconstructIcon(nested);
+                count++;
+              } catch (error) {
+                console.error(`Error reconstructing nested icon ${nested.iconId}:`, error);
+                count++;
+              }
+            }
+            // Recursively process deeper nesting
+            if (nested.objects) {
+              count += await reconstructNestedIcons(nested.objects);
+            }
+          }
+          return count;
+        };
+
+        // Count total icons (including nested)
+        const iconCount = countAllIcons(canvasData.objects);
+        let loadedIcons = 0;
+
+        if (iconCount > 0) {
+          setIconLoadingProgress({ current: 0, total: iconCount });
+        }
+
+        for (let i = 0; i < canvasData.objects.length; i++) {
+          const objData = canvasData.objects[i];
+
+          // Process membrane groups - reconstruct nested icons
+          if (objData.isMembraneShape && objData.objects) {
+
+            const nestedCount = await reconstructNestedIcons(objData.objects);
+            loadedIcons += nestedCount;
+            if (iconCount > 0) {
+              setIconLoadingProgress(prev => {
+                if (!prev || loadedIcons > prev.current) {
+                  return { current: loadedIcons, total: iconCount };
+                }
+                return prev;
+              });
+            }
+          }
+
+          // Detect library icon references
+          if (objData.type === 'libraryIcon' && objData.iconId) {
+            try {
+
+              await reconstructIcon(objData);
+
+              // Update progress
+              loadedIcons++;
+              if (iconCount > 0) {
+                setIconLoadingProgress(prev => {
+                  // Only update if new value is greater (prevent decrements)
+                  if (!prev || loadedIcons > prev.current) {
+                    return { current: loadedIcons, total: iconCount };
+                  }
+                  return prev;
+                });
+              }
+            } catch (error) {
+              console.error(`Error reconstructing icon ${objData.iconId}:`, error);
+              // Still count failed icons towards progress
+              loadedIcons++;
+              if (iconCount > 0) {
+                setIconLoadingProgress(prev => {
+                  // Only update if new value is greater (prevent decrements)
+                  if (!prev || loadedIcons > prev.current) {
+                    return { current: loadedIcons, total: iconCount };
+                  }
+                  return prev;
+                });
+              }
+            }
+          }
+        }
+
+        // Clear progress indicator
+        if (iconCount > 0) {
+          setIconLoadingProgress(null);
+        }
+      }
+
+      await canvas.loadFromJSON(canvasData);
+
+      // Clean up any grid lines or rulers that might have been saved in old data
+      // These should never be loaded from saved data as they're recreated on load
+      const strayUIElements = canvas.getObjects().filter((obj: any) =>
+        obj.isGridLine || obj.isRuler
+      );
+      strayUIElements.forEach(obj => {
+        canvas.remove(obj);
+      });
+
+      // Manually restore custom properties from the JSON data
+      // Fabric.js sometimes doesn't properly restore custom properties during loadFromJSON
+      if (canvasData.objects) {
+        const loadedObjects = canvas.getObjects();
+        canvasData.objects.forEach((objData: any, index: number) => {
+          const obj = loadedObjects[index];
+          if (obj && objData) {
+            // Restore membrane shape properties FIRST (before bezier paths)
+            // Membranes store bezier points but should NOT be marked as isBezierPath
+            if (objData.isMembraneShape) {
+              (obj as any).isMembraneShape = true;
+              if (objData.membraneOptions) (obj as any).membraneOptions = objData.membraneOptions;
+              if (objData.bezierPoints) (obj as any).bezierPoints = objData.bezierPoints;
+              if (objData.worldBezierPoints) (obj as any).worldBezierPoints = objData.worldBezierPoints;
+              if (objData.isClosed !== undefined) (obj as any).isClosed = objData.isClosed;
+              if (objData.id) (obj as any).id = objData.id;
+
+              // Ensure group allows subTarget selection but icons are not individually selectable
+              obj.set({
+                subTargetCheck: true,
+                interactive: true,
+                objectCaching: false,
+              });
+
+              // Ensure all child icons are not selectable/evented (only group is)
+              if (obj.type === 'group' && (obj as any)._objects) {
+                (obj as any)._objects.forEach((icon: any) => {
+                  icon.set({
+                    selectable: false,
+                    evented: false,
+                  });
+                });
+              }
+
+              // Re-apply toObject override for membrane shapes
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'isMembraneShape',
+                  'membraneOptions',
+                  'bezierPoints',
+                  'worldBezierPoints',
+                  'isClosed',
+                  'id'
+                ]);
+              };
+            }
+            // Restore bezier path properties (but NOT for membrane shapes)
+            else if (objData.bezierPoints && !objData.isMembraneShape) {
+              (obj as any).bezierPoints = objData.bezierPoints;
+              (obj as any).isBezierPath = true;
+              (obj as any).bezierPointsAreLocal = objData.bezierPointsAreLocal;
+
+              // Re-apply toObject override to ensure properties are serialized on future saves
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'bezierPoints',
+                  'bezierPointsAreLocal',
+                  'isBezierPath',
+                  'id'
+                ]);
+              };
+            }
+            // Restore curved line properties
+            if (objData.isCurvedLine) {
+              (obj as any).isCurvedLine = true;
+              if (objData.curvedLocalStart) (obj as any).curvedLocalStart = objData.curvedLocalStart;
+              if (objData.curvedLocalEnd) (obj as any).curvedLocalEnd = objData.curvedLocalEnd;
+              if (objData.curvedLocalControl) (obj as any).curvedLocalControl = objData.curvedLocalControl;
+            }
+            // Restore other custom properties as needed
+            if (objData.isMaskedImage) (obj as any).isMaskedImage = true;
+            if (objData.isConnector) (obj as any).isConnector = true;
+            // Restore icon reference properties
+            if (objData.iconId) (obj as any).iconId = objData.iconId;
+            if (objData.isLibraryIcon) (obj as any).isLibraryIcon = true;
+            // Restore icon styling properties (tone/tint)
+            if (objData.iconToneColor) (obj as any).iconToneColor = objData.iconToneColor;
+            if (objData.iconToneIntensity !== undefined) (obj as any).iconToneIntensity = objData.iconToneIntensity;
+            if (objData.iconToneHue !== undefined) (obj as any).iconToneHue = objData.iconToneHue;
+            if (objData.originalColors) {
+              // Convert serialized object back to Map
+              (obj as any).originalColors = new Map(Object.entries(objData.originalColors));
+            }
+          }
+        });
+
+        // Verify restoration
+        loadedObjects.forEach((obj: any, index: number) => {
+          if (obj.type === 'path') {
+          }
+        });
+      }
+
+      // Reload images with CORS to prevent tainting
+      reloadCanvasImagesWithCORS(canvas);
+
+      // Normalize all text fonts to use full font stacks (including text in groups)
+      normalizeCanvasTextFonts(canvas);
+
+      // Enhanced cleanup: Remove transient UI elements by flag AND visual appearance
+      const { cleanupOrphanHandles, reconnectCurvedLines } = await import('@/lib/curvedLineTool');
+      cleanupOrphanHandles(canvas);
+
+      // Reconnect all curved lines with their control handles
+      reconnectCurvedLines(canvas);
+
+      // Rasterize all membranes for performance
+      const { MembranePathTool } = await import('@/lib/membranePathTool');
+      const allObjects = canvas.getObjects();
+      const membraneObjects = allObjects.filter((obj: any) => obj.isMembraneShape);
+      console.log(`[LOAD] Found ${membraneObjects.length} membrane objects:`, membraneObjects.map((obj: any) => ({
+        type: obj.type,
+        isMembraneShape: obj.isMembraneShape,
+        isRasterizedMembrane: obj.isRasterizedMembrane
+      })));
+
+      const membranes = membraneObjects.filter((obj: any) => !obj.isRasterizedMembrane);
+
+      for (const membrane of membranes) {
+        try {
+          const rasterized = await MembranePathTool.rasterizeMembrane(membrane as any);
+          canvas.remove(membrane);
+          canvas.add(rasterized);
+
+        } catch (error) {
+          console.error('[LOAD] Failed to rasterize membrane:', error);
+        }
+      }
+      canvas.renderAll();
+
+      // Update context state
+      setCurrentProjectId(data.id);
+      setProjectOwnerId(data.user_id);
+      setProjectName(data.name);
+      setPaperSize(data.paper_size);
+      setCanvasDimensions({
+        width: data.canvas_width,
+        height: data.canvas_height
+      });
+
+      // Increment version to trigger ruler/grid re-render
+      setCanvasLoadVersion(prev => prev + 1);
+
+      // Restore custom dimensions if this is a custom-sized canvas
+      if (data.paper_size === 'custom' && data.custom_unit) {
+        const unit = data.custom_unit as Unit;
+        setCustomDimensions({
+          width: fromPixels(data.canvas_width, unit),
+          height: fromPixels(data.canvas_height, unit),
+          unit: unit
+        });
+      }
+
+      toast.success("Project loaded");
+
+      // Mark this project as loaded to prevent redundant reloads
+      setLoadedProjectId(id);
+
+      // Clear history and save initial state after loading project
+      historyManager.current.clear();
+      saveState();
+      setSaveStatus('saved');
+      setIsDirty(false); // Clear dirty flag after loading
+
+      // Clear any stale recovery data since we just loaded fresh from database
+      localStorage.removeItem('canvas_recovery');
+    } catch (error: any) {
+      console.error('Load error:', error);
+      toast.error(error.message || "Failed to load project");
+    } finally {
+      // Always clear loading flag when done
+      isLoadingProjectRef.current = false;
+      setIsLoadingProject(false);
+    }
+  }, [canvas, user, saveState, loadedProjectId]);
+
+  const loadSharedProject = useCallback(async (id: string) => {
+    if (!canvas || !user) return;
+
+    // Set flag to prevent auto-save during project load
+    isLoadingProjectRef.current = true;
+    setIsLoadingProject(true);
+
+    try {
+      const { data, error} = await supabase
+        .from('canvas_projects')
+        .select('*')
+        .eq('id', id)
+        .eq('is_public', true)
+        .eq('approval_status', 'approved')
+        .single();
+
+      if (error || !data) {
+        toast.error("Shared project not found or not available");
+        navigate('/projects');
+        isLoadingProjectRef.current = false;
+        setIsLoadingProject(false);
+        return;
+      }
+
+      // Wait for all fonts to load
+      toast("Loading shared project...");
+      await loadAllFonts();
+
+      // Load canvas data
+      const canvasData = data.canvas_data as Record<string, any>;
+      await canvas.loadFromJSON(canvasData);
+
+      // Clean up any grid lines or rulers that might have been saved in old data
+      // These should never be loaded from saved data as they're recreated on load
+      const strayUIElements = canvas.getObjects().filter((obj: any) =>
+        obj.isGridLine || obj.isRuler
+      );
+      strayUIElements.forEach(obj => {
+        canvas.remove(obj);
+      });
+
+      // Manually restore custom properties from the JSON data
+      // Fabric.js sometimes doesn't properly restore custom properties during loadFromJSON
+      if (canvasData.objects) {
+        const loadedObjects = canvas.getObjects();
+        canvasData.objects.forEach((objData: any, index: number) => {
+          const obj = loadedObjects[index];
+          if (obj && objData) {
+            // Restore membrane shape properties FIRST (before bezier paths)
+            // Membranes store bezier points but should NOT be marked as isBezierPath
+            if (objData.isMembraneShape) {
+              (obj as any).isMembraneShape = true;
+              if (objData.membraneOptions) (obj as any).membraneOptions = objData.membraneOptions;
+              if (objData.bezierPoints) (obj as any).bezierPoints = objData.bezierPoints;
+              if (objData.worldBezierPoints) (obj as any).worldBezierPoints = objData.worldBezierPoints;
+              if (objData.isClosed !== undefined) (obj as any).isClosed = objData.isClosed;
+              if (objData.id) (obj as any).id = objData.id;
+
+              // Ensure group allows subTarget selection but icons are not individually selectable
+              obj.set({
+                subTargetCheck: true,
+                interactive: true,
+                objectCaching: false,
+              });
+
+              // Ensure all child icons are not selectable/evented (only group is)
+              if (obj.type === 'group' && (obj as any)._objects) {
+                (obj as any)._objects.forEach((icon: any) => {
+                  icon.set({
+                    selectable: false,
+                    evented: false,
+                  });
+                });
+              }
+
+              // Re-apply toObject override for membrane shapes
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'isMembraneShape',
+                  'membraneOptions',
+                  'bezierPoints',
+                  'worldBezierPoints',
+                  'isClosed',
+                  'id'
+                ]);
+              };
+            }
+            // Restore bezier path properties (but NOT for membrane shapes)
+            else if (objData.bezierPoints && !objData.isMembraneShape) {
+              obj.set('bezierPoints', objData.bezierPoints);
+              obj.set('isBezierPath', true);
+              obj.set('bezierPointsAreLocal', objData.bezierPointsAreLocal);
+
+              // Re-apply toObject override to ensure properties are serialized on future saves
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'bezierPoints',
+                  'bezierPointsAreLocal',
+                  'isBezierPath',
+                  'id'
+                ]);
+              };
+            }
+            // Restore curved line properties
+            if (objData.isCurvedLine) {
+              obj.set('isCurvedLine', true);
+              if (objData.curvedLocalStart) obj.set('curvedLocalStart', objData.curvedLocalStart);
+              if (objData.curvedLocalEnd) obj.set('curvedLocalEnd', objData.curvedLocalEnd);
+              if (objData.curvedLocalControl) obj.set('curvedLocalControl', objData.curvedLocalControl);
+            }
+            // Restore other custom properties as needed
+            if (objData.isMaskedImage) obj.set('isMaskedImage', true);
+            if (objData.isConnector) obj.set('isConnector', true);
+            // Restore icon reference properties
+            if (objData.iconId) (obj as any).iconId = objData.iconId;
+            if (objData.isLibraryIcon) (obj as any).isLibraryIcon = true;
+            // Restore icon styling properties (tone/tint)
+            if (objData.iconToneColor) (obj as any).iconToneColor = objData.iconToneColor;
+            if (objData.iconToneIntensity !== undefined) (obj as any).iconToneIntensity = objData.iconToneIntensity;
+            if (objData.iconToneHue !== undefined) (obj as any).iconToneHue = objData.iconToneHue;
+            if (objData.originalColors) {
+              // Convert serialized object back to Map
+              (obj as any).originalColors = new Map(Object.entries(objData.originalColors));
+            }
+          }
+        });
+      }
+
+      // Reload images with CORS
+      reloadCanvasImagesWithCORS(canvas);
+
+      // Normalize fonts
+      normalizeCanvasTextFonts(canvas);
+
+      // Cleanup and reconnect
+      const { cleanupOrphanHandles, reconnectCurvedLines } = await import('@/lib/curvedLineTool');
+      cleanupOrphanHandles(canvas);
+      reconnectCurvedLines(canvas);
+
+      // Update state
+      setCurrentProjectId(data.id);
+      setProjectOwnerId(data.user_id);
+      setProjectName(data.name);
+      setPaperSize(data.paper_size);
+      setCanvasDimensions({
+        width: data.canvas_width,
+        height: data.canvas_height
+      });
+
+      // Increment version to trigger ruler/grid re-render
+      setCanvasLoadVersion(prev => prev + 1);
+
+      if (data.paper_size === 'custom' && data.custom_unit) {
+        const unit = data.custom_unit as Unit;
+        setCustomDimensions({
+          width: fromPixels(data.canvas_width, unit),
+          height: fromPixels(data.canvas_height, unit),
+          unit: unit
+        });
+      }
+
+      // Lock all objects for read-only mode
+      canvas.getObjects().forEach(obj => {
+        obj.set({
+          selectable: false,
+          evented: false,
+          hasControls: false,
+          hasBorders: false,
+          lockMovementX: true,
+          lockMovementY: true,
+          lockRotation: true,
+          lockScalingX: true,
+          lockScalingY: true,
+        });
+      });
+
+      canvas.selection = false;
+      canvas.renderAll();
+
+      toast.success("Shared project loaded (read-only)");
+      historyManager.current.clear();
+      setSaveStatus('saved');
+      setIsDirty(false); // Clear dirty flag after loading
+    } catch (error: any) {
+      console.error('Load shared project error:', error);
+      toast.error(error.message || "Failed to load shared project");
+      navigate('/projects');
+    } finally {
+      // Always clear loading flag when done
+      isLoadingProjectRef.current = false;
+      setIsLoadingProject(false);
+    }
+  }, [canvas, user, navigate]);
+
+  // Activity tracking for smart auto-save (canvas events only)
+  useEffect(() => {
+    if (!canvas) return;
+
+    const updateActivity = () => {
+      lastActivityTimeRef.current = Date.now();
+    };
+
+    // Track canvas edit events
+    canvas.on('object:modified', updateActivity);
+    canvas.on('object:moving', updateActivity);
+    canvas.on('object:scaling', updateActivity);
+    canvas.on('object:rotating', updateActivity);
+    canvas.on('object:added', updateActivity);
+    canvas.on('object:removed', updateActivity);
+
+    return () => {
+      canvas.off('object:modified', updateActivity);
+      canvas.off('object:moving', updateActivity);
+      canvas.off('object:scaling', updateActivity);
+      canvas.off('object:rotating', updateActivity);
+      canvas.off('object:added', updateActivity);
+      canvas.off('object:removed', updateActivity);
+    };
+  }, [canvas]);
+
+  // Debounced auto-save - triggers after 5 seconds of no canvas activity
+  useEffect(() => {
+    if (!canvas || !user || !isDirty || isReadOnly) return;
+
+    // Skip auto-save if we're currently loading a project
+    if (isLoadingProjectRef.current) return;
+
+    const INACTIVITY_DELAY = 5000; // 5 seconds of no canvas activity
+
+    const checkAndSave = () => {
+      const timeSinceActivity = Date.now() - lastActivityTimeRef.current;
+
+      if (timeSinceActivity >= INACTIVITY_DELAY) {
+        // 5+ seconds of no canvas activity, safe to save
+        if (isDirty && canvas && user && !isReadOnly && !isLoadingProjectRef.current) {
+          // Check if canvas has actual content (exclude UI elements like grid/rulers)
+          const hasContent = canvas.getObjects().some(obj =>
+            !(obj as any).isGridLine &&
+            !(obj as any).isRuler &&
+            !(obj as any).isControlHandle &&
+            !(obj as any).isHandleLine &&
+            !(obj as any).isGuideLine
+          );
+
+          // Only auto-save if there's actual content
+          if (hasContent) {
+
+            saveProject();
+          }
+          setIsDirty(false);
+        }
+      }
+    };
+
+    // Check every second if we should save
+    const interval = setInterval(checkAndSave, 1000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [canvas, user, isDirty, isReadOnly, saveProject]);
+
+  // Periodic auto-save - REMOVED (debounced save with activity tracking is sufficient)
+
+  // Optimized auto-recovery - only save if dirty
+  useEffect(() => {
+    if (!canvas || !isDirty || isReadOnly) return;
+
+    const debouncedRecover = debounce(() => {
+      if (saveStatus === 'unsaved' && isDirty && !isReadOnly) {
+        // Include custom properties when saving recovery state
+        const CUSTOM_PROPS = [
+          // Bezier path properties
+          'bezierPoints', 'isBezierPath', 'bezierPointsAreLocal',
+          // Curved line properties
+          'isCurvedLine', 'curvedLineStart', 'curvedLineEnd', 'curvedLineControlPoint',
+          'curvedLocalStart', 'curvedLocalEnd', 'curvedLocalControl', 'curvedLineVersion',
+          'startMarkerType', 'endMarkerType', 'markerOptions',
+          // Image mask properties
+          'isMaskedImage', 'maskShape', 'cornerRadius',
+          // Image crop properties
+          'cropConfig',
+          // Connector properties
+          'isConnector', 'connectorData', 'startConnection', 'endConnection',
+          // Line intersection properties
+          'intersectionBehavior', 'arcRadius', 'gapSize', 'bridgeWidth', 'bridgeColor',
+          // Membrane shape properties
+          'isMembraneShape', 'membraneOptions', 'worldBezierPoints', 'isClosed', 'isRasterizedMembrane', 'originalScaleX', 'originalScaleY', 'vectorObjects',
+          // Chart properties
+          'chartConfig',
+          // Icon properties (for reference-based saving)
+          'iconId', 'isLibraryIcon', 'originalType',
+          // Icon styling properties (tone/tint)
+          'iconToneColor', 'iconToneIntensity', 'iconToneHue', 'originalColors',
+          // Effects properties
+          'shadow',
+          // Other custom properties
+          'id', 'name', 'data', 'customProp', 'customType'
+        ];
+
+        // Filter out UI elements (grids, rulers, guides, handles) before saving
+        const allObjects = canvas.getObjects();
+        const userObjects = allObjects.filter((obj: any) => {
+          return !obj.isGridLine &&
+                 !obj.isRuler &&
+                 !obj.excludeFromExport &&
+                 !obj.isControlHandle &&
+                 !obj.isHandleLine &&
+                 !obj.isAnchorHandle &&
+                 !obj.isGuideLine &&
+                 !obj.isEraserPath &&
+                 !obj.isPortIndicator &&
+                 !obj.isFeedback;
+        });
+
+        // Create recovery state with filtered objects
+        const state: any = {
+          version: '6.0.0',
+          objects: userObjects.map((obj: any) => {
+            const objData = obj.toObject(CUSTOM_PROPS);
+            // Manually ensure all custom props are included
+            CUSTOM_PROPS.forEach(prop => {
+              if (obj[prop] !== undefined) {
+                objData[prop] = obj[prop];
+              }
+            });
+
+            // Convert Map to plain object for JSON serialization
+            if (obj.originalColors instanceof Map) {
+              objData.originalColors = Object.fromEntries(obj.originalColors);
+            }
+
+            // Helper function to recursively strip icon content from nested objects
+            const stripNestedIcons = (nestedObjects: any[]) => {
+              if (!nestedObjects || !Array.isArray(nestedObjects)) return;
+
+              nestedObjects.forEach((nestedObj: any) => {
+                if (nestedObj.iconId && nestedObj.isLibraryIcon) {
+                  const nestedType = nestedObj.type;
+                  if ((nestedObj.type === 'Group' || nestedObj.type === 'group') && nestedObj.objects) {
+                    delete nestedObj.objects;
+                  } else if ((nestedObj.type === 'Path' || nestedObj.type === 'path') && nestedObj.path) {
+                    delete nestedObj.path;
+                  } else if ((nestedObj.type === 'Image' || nestedObj.type === 'image') && nestedObj.src) {
+                    delete nestedObj.src;
+                  }
+                  nestedObj.type = 'libraryIcon';
+                  nestedObj.originalType = nestedType;
+                } else if (nestedObj.objects) {
+                  stripNestedIcons(nestedObj.objects);
+                }
+              });
+            };
+
+            // Process rasterized membranes - they store vector data for edit mode
+            if (obj.isRasterizedMembrane) {
+              // Rasterized membranes store vectorObjects which may contain nested icons
+              if (objData.vectorObjects && objData.vectorObjects.objects) {
+                stripNestedIcons(objData.vectorObjects.objects);
+              }
+            }
+
+            // Process membrane groups - strip icons inside them
+            if (obj.isMembraneShape && objData.objects) {
+              stripNestedIcons(objData.objects);
+            }
+
+            // Icon-by-reference: Strip SVG content from library icons
+            if (obj.isLibraryIcon && obj.iconId) {
+              const originalType = objData.type;
+
+              if ((objData.type === 'Group' || objData.type === 'group') && objData.objects) {
+                delete objData.objects;
+              } else if ((objData.type === 'Path' || objData.type === 'path') && objData.path) {
+                delete objData.path;
+              } else if ((objData.type === 'Image' || objData.type === 'image') && objData.src) {
+                delete objData.src;
+              }
+
+              objData.type = 'libraryIcon';
+              objData.originalType = originalType;
+            }
+
+            return objData;
+          }),
+          background: canvas.backgroundColor || '',
+        };
+
+        const recovery = {
+          state,
+          timestamp: Date.now(),
+          projectName,
+          projectId: currentProjectId
+        };
+        localStorage.setItem('canvas_recovery', JSON.stringify(recovery));
+      }
+    }, 30000);
+
+    debouncedRecover();
+  }, [canvas, saveStatus, projectName, currentProjectId, isDirty, isReadOnly]);
+
+  // Warn on page unload if unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (saveStatus === 'unsaved') {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [saveStatus]);
+
+  // Save initial canvas state when canvas is first created
+  useEffect(() => {
+    if (!canvas) return;
+
+    // Save initial empty state so undo/redo works correctly
+    // Use ref to prevent saving multiple times if component re-renders
+    // Use 200ms delay - enough for canvas to initialize but before tests start creating objects
+    if (historyManager.current.getHistoryLength() === 0 && !initialStateSaved.current) {
+      initialStateSaved.current = true;
+      const timer = setTimeout(() => {
+        saveState();
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [canvas, saveState]);
+
+  // Set up icon reconstructor for history manager (undo/redo)
+  useEffect(() => {
+    if (!supabase) return;
+
+    const reconstructIcons = async (canvasData: any) => {
+      if (!canvasData.objects || canvasData.objects.length === 0) return;
+
+      const { loadSVGFromString, util } = await import('fabric');
+
+      // Helper to recursively reconstruct nested icons in membrane groups
+      const reconstructNestedIcons = async (nestedObjects: any[]) => {
+        if (!nestedObjects || !Array.isArray(nestedObjects)) return;
+
+        for (const nested of nestedObjects) {
+          if (nested.iconId && nested.isLibraryIcon) {
+            try {
+              const { data: iconData } = await supabase.from('icons').select('svg_content').eq('id', nested.iconId).single();
+              if (iconData?.svg_content) {
+                const svgResult = await loadSVGFromString(iconData.svg_content, undefined, { crossOrigin: 'anonymous' });
+                const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+                const originalType = nested.originalType || nested.type || 'Group';
+                if (originalType.toLowerCase() === 'group') {
+                  const groupData = tempGroup.toObject();
+                  nested.objects = groupData.objects;
+                } else if (originalType.toLowerCase() === 'path' && tempGroup._objects && tempGroup._objects[0]) {
+                  const pathData = tempGroup._objects[0].toObject();
+                  nested.path = pathData.path;
+                } else if (originalType.toLowerCase() === 'image' && tempGroup._objects && tempGroup._objects[0]) {
+                  const imageData = tempGroup._objects[0].toObject();
+                  nested.src = imageData.src;
+                }
+              }
+            } catch (error) {
+              console.error(`[HISTORY] Failed to reconstruct nested icon ${nested.iconId}:`, error);
+            }
+          } else if (nested.objects) {
+            await reconstructNestedIcons(nested.objects);
+          }
+        }
+      };
+
+      // Process each object
+      for (const objData of canvasData.objects) {
+        // Process rasterized membranes
+        if (objData.isRasterizedMembrane && objData.vectorObjects && objData.vectorObjects.objects) {
+          await reconstructNestedIcons(objData.vectorObjects.objects);
+        }
+
+        // Process membrane groups
+        if (objData.isMembraneShape && objData.objects) {
+          await reconstructNestedIcons(objData.objects);
+        }
+
+        // Process top-level library icons
+        if (objData.isLibraryIcon && objData.iconId) {
+          try {
+            const { data: iconData } = await supabase.from('icons').select('svg_content').eq('id', objData.iconId).single();
+            if (!iconData?.svg_content) continue;
+
+            const svgResult = await loadSVGFromString(iconData.svg_content, undefined, { crossOrigin: 'anonymous' });
+            const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+            const originalType = objData.originalType || objData.type || 'Group';
+            if (originalType.toLowerCase() === 'group') {
+              const groupData = tempGroup.toObject();
+              objData.objects = groupData.objects;
+              objData.type = originalType;
+            } else if (originalType.toLowerCase() === 'path' && tempGroup._objects && tempGroup._objects[0]) {
+              const pathData = tempGroup._objects[0].toObject();
+              objData.path = pathData.path;
+              objData.type = originalType;
+            } else if (originalType.toLowerCase() === 'image' && tempGroup._objects && tempGroup._objects[0]) {
+              const imageData = tempGroup._objects[0].toObject();
+              objData.src = imageData.src;
+              objData.type = originalType;
+            }
+          } catch (error) {
+            console.error(`[HISTORY] Failed to reconstruct icon ${objData.iconId}:`, error);
+          }
+        }
+      }
+    };
+
+    historyManager.current.setIconReconstructor(reconstructIcons);
+  }, [supabase]);
+
+  const recoverCanvas = useCallback(async (recoveryData: any) => {
+    if (!canvas) return;
+
+    const recoveryState = recoveryData.state;
+
+    // Icon-by-reference: Reconstruct icons from references before loading
+    if (recoveryState.objects && recoveryState.objects.length > 0) {
+      const { loadSVGFromString, util } = await import('fabric');
+
+      const iconCount = recoveryState.objects.filter((obj: any) => obj.type === 'libraryIcon' && obj.iconId).length;
+      let loadedIcons = 0;
+
+      if (iconCount > 0) {
+        setIconLoadingProgress({ current: 0, total: iconCount });
+      }
+
+      // Helper to recursively reconstruct nested icons in membrane groups
+      const reconstructNestedIcons = async (nestedObjects: any[]): Promise<number> => {
+        let count = 0;
+        for (const nested of nestedObjects) {
+          if (nested.type === 'libraryIcon' && nested.iconId) {
+            try {
+              const { data: iconData } = await supabase.from('icons').select('svg_content, thumbnail').eq('id', nested.iconId).single();
+              if (iconData?.svg_content) {
+                const svgResult = await loadSVGFromString(iconData.svg_content, undefined, { crossOrigin: 'anonymous' });
+                const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+                // Set crossOrigin on image elements
+                const setImageCrossOrigin = (obj: any) => {
+                  if (obj.type === 'image' || obj.type === 'Image') obj.set({ crossOrigin: 'anonymous' });
+                  if (obj._objects) obj._objects.forEach((child: any) => setImageCrossOrigin(child));
+                };
+                setImageCrossOrigin(tempGroup);
+                const originalType = nested.originalType || 'Group';
+                if (originalType.toLowerCase() === 'group') {
+                  nested.objects = tempGroup.toObject().objects;
+                  nested.type = originalType;
+                }
+                count++;
+              }
+            } catch (error) {
+              count++;
+            }
+          }
+          if (nested.objects) {
+            count += await reconstructNestedIcons(nested.objects);
+          }
+        }
+        return count;
+      };
+
+      for (let i = 0; i < recoveryState.objects.length; i++) {
+        const objData = recoveryState.objects[i];
+
+        // Process membrane groups first
+        if (objData.isMembraneShape && objData.objects) {
+          const nestedCount = await reconstructNestedIcons(objData.objects);
+          loadedIcons += nestedCount;
+          if (iconCount > 0) {
+            setIconLoadingProgress(prev => (!prev || loadedIcons > prev.current) ? { current: loadedIcons, total: iconCount } : prev);
+          }
+        }
+
+        if (objData.type === 'libraryIcon' && objData.iconId) {
+          try {
+            const { data: iconData, error: iconError } = await supabase
+              .from('icons')
+              .select('svg_content')
+              .eq('id', objData.iconId)
+              .single();
+
+            if (iconError || !iconData?.svg_content) {
+              console.error(`Failed to load icon ${objData.iconId}:`, iconError);
+              continue;
+            }
+
+            const svgResult = await loadSVGFromString(iconData.svg_content);
+            const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+            const originalType = objData.originalType || 'Group';
+            const normalizedType = originalType.toLowerCase();
+
+            if (normalizedType === 'group') {
+              const groupData = tempGroup.toObject();
+              objData.objects = groupData.objects;
+              objData.type = originalType;
+            } else if (normalizedType === 'path' && tempGroup._objects && tempGroup._objects[0]) {
+              const pathData = tempGroup._objects[0].toObject();
+              objData.path = pathData.path;
+              objData.type = originalType;
+            } else if (normalizedType === 'image') {
+              const groupData = tempGroup.toObject();
+              objData.objects = groupData.objects;
+              objData.type = originalType;
+            } else {
+              const groupData = tempGroup.toObject();
+              objData.objects = groupData.objects;
+              objData.type = 'Group';
+            }
+
+            loadedIcons++;
+            if (iconCount > 0) {
+              setIconLoadingProgress(prev => {
+                // Only update if new value is greater (prevent decrements)
+                if (!prev || loadedIcons > prev.current) {
+                  return { current: loadedIcons, total: iconCount };
+                }
+                return prev;
+              });
+            }
+          } catch (error) {
+            console.error(`Error reconstructing icon ${objData.iconId}:`, error);
+            loadedIcons++;
+            if (iconCount > 0) {
+              setIconLoadingProgress(prev => {
+                // Only update if new value is greater (prevent decrements)
+                if (!prev || loadedIcons > prev.current) {
+                  return { current: loadedIcons, total: iconCount };
+                }
+                return prev;
+              });
+            }
+          }
+        }
+      }
+
+      if (iconCount > 0) {
+        setIconLoadingProgress(null);
+      }
+    }
+
+    canvas.loadFromJSON(recoveryState).then(async () => {
+      // Clean up any grid lines or rulers that might have been saved in old data
+      const strayUIElements = canvas.getObjects().filter((obj: any) =>
+        obj.isGridLine || obj.isRuler
+      );
+      strayUIElements.forEach(obj => {
+        canvas.remove(obj);
+      });
+
+      // Manually restore custom properties
+      if (recoveryState.objects) {
+        const loadedObjects = canvas.getObjects();
+        recoveryState.objects.forEach((objData: any, index: number) => {
+          const obj = loadedObjects[index];
+          if (obj && objData) {
+            // Restore membrane shape properties FIRST (before bezier paths)
+            // Membranes store bezier points but should NOT be marked as isBezierPath
+            if (objData.isMembraneShape) {
+              (obj as any).isMembraneShape = true;
+              if (objData.membraneOptions) (obj as any).membraneOptions = objData.membraneOptions;
+              if (objData.bezierPoints) (obj as any).bezierPoints = objData.bezierPoints;
+              if (objData.worldBezierPoints) (obj as any).worldBezierPoints = objData.worldBezierPoints;
+              if (objData.isClosed !== undefined) (obj as any).isClosed = objData.isClosed;
+              if (objData.id) (obj as any).id = objData.id;
+
+              // Ensure group allows subTarget selection but icons are not individually selectable
+              obj.set({
+                subTargetCheck: true,
+                interactive: true,
+                objectCaching: false,
+              });
+
+              // Ensure all child icons are not selectable/evented (only group is)
+              if (obj.type === 'group' && (obj as any)._objects) {
+                (obj as any)._objects.forEach((icon: any) => {
+                  icon.set({
+                    selectable: false,
+                    evented: false,
+                  });
+                });
+              }
+
+              // Re-apply toObject override for membrane shapes
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'isMembraneShape',
+                  'membraneOptions',
+                  'bezierPoints',
+                  'worldBezierPoints',
+                  'isClosed',
+                  'id'
+                ]);
+              };
+            }
+            // Restore bezier path properties (but NOT for membrane shapes)
+            else if (objData.bezierPoints && !objData.isMembraneShape) {
+              obj.set('bezierPoints', objData.bezierPoints);
+              obj.set('isBezierPath', true);
+              obj.set('bezierPointsAreLocal', objData.bezierPointsAreLocal);
+
+              // Re-apply toObject override to ensure properties are serialized on future saves
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'bezierPoints',
+                  'bezierPointsAreLocal',
+                  'isBezierPath',
+                  'id'
+                ]);
+              };
+            }
+            if (objData.isCurvedLine) {
+              obj.set('isCurvedLine', true);
+              if (objData.curvedLocalStart) obj.set('curvedLocalStart', objData.curvedLocalStart);
+              if (objData.curvedLocalEnd) obj.set('curvedLocalEnd', objData.curvedLocalEnd);
+              if (objData.curvedLocalControl) obj.set('curvedLocalControl', objData.curvedLocalControl);
+            }
+            if (objData.isMaskedImage) obj.set('isMaskedImage', true);
+            if (objData.isConnector) obj.set('isConnector', true);
+            // Restore icon reference properties
+            if (objData.iconId) obj.set('iconId', objData.iconId);
+            if (objData.isLibraryIcon) obj.set('isLibraryIcon', true);
+            // Restore icon styling properties (tone/tint)
+            if (objData.iconToneColor) (obj as any).iconToneColor = objData.iconToneColor;
+            if (objData.iconToneIntensity !== undefined) (obj as any).iconToneIntensity = objData.iconToneIntensity;
+            if (objData.iconToneHue !== undefined) (obj as any).iconToneHue = objData.iconToneHue;
+            if (objData.originalColors) {
+              // Convert serialized object back to Map
+              (obj as any).originalColors = new Map(Object.entries(objData.originalColors));
+            }
+          }
+        });
+      }
+
+      reloadCanvasImagesWithCORS(canvas);
+
+      // Normalize all text fonts to use full font stacks (including text in groups)
+      normalizeCanvasTextFonts(canvas);
+
+      // Enhanced cleanup: Remove transient UI elements by flag AND visual appearance
+      const { cleanupOrphanHandles, reconnectCurvedLines } = await import('@/lib/curvedLineTool');
+      cleanupOrphanHandles(canvas);
+
+      // Reconnect all curved lines with their control handles
+      reconnectCurvedLines(canvas);
+
+      // Rasterize all membranes for performance
+      const { MembranePathTool } = await import('@/lib/membranePathTool');
+      const membranes = canvas.getObjects().filter((obj: any) => obj.isMembraneShape && !obj.isRasterizedMembrane);
+      for (const membrane of membranes) {
+        try {
+          const rasterized = await MembranePathTool.rasterizeMembrane(membrane as any);
+          canvas.remove(membrane);
+          canvas.add(rasterized);
+
+        } catch (error) {
+          console.error('[RECOVER] Failed to rasterize membrane:', error);
+        }
+      }
+      canvas.renderAll();
+
+      // Increment version to trigger ruler/grid re-render
+      setCanvasLoadVersion(prev => prev + 1);
+
+      toast.success('Canvas recovered successfully!');
+      localStorage.removeItem('canvas_recovery');
+      setSaveStatus('unsaved');
+    });
+  }, [canvas]);
+
+  const checkForRecovery = useCallback(() => {
+    const recovery = localStorage.getItem('canvas_recovery');
+    if (recovery) {
+      const data = JSON.parse(recovery);
+      const ageMinutes = (Date.now() - data.timestamp) / 60000;
+      if (ageMinutes < 60) {
+        return {
+          data,
+          ageMinutes: Math.floor(ageMinutes)
+        };
+      } else {
+        localStorage.removeItem('canvas_recovery');
+      }
+    }
+    return null;
+  }, []);
+
+  const loadTemplate = useCallback(async (template: any) => {
+    if (!canvas) return;
+
+    try {
+      toast("Loading template...");
+      await loadAllFonts();
+
+      canvas.clear();
+      setLoadedProjectId(null); // Clear loaded project when loading template
+      const templateData = template.canvasData;
+
+      // Icon-by-reference: Reconstruct icons from references before loading
+      if (templateData.objects && templateData.objects.length > 0) {
+        const { loadSVGFromString, util } = await import('fabric');
+
+        const iconCount = templateData.objects.filter((obj: any) => obj.type === 'libraryIcon' && obj.iconId).length;
+        let loadedIcons = 0;
+
+        if (iconCount > 0) {
+          setIconLoadingProgress({ current: 0, total: iconCount });
+        }
+
+        // Helper to recursively reconstruct nested icons in membrane groups
+        const reconstructNestedIcons = async (nestedObjects: any[]): Promise<number> => {
+          let count = 0;
+          for (const nested of nestedObjects) {
+            if (nested.type === 'libraryIcon' && nested.iconId) {
+              try {
+                const { data: iconData } = await supabase.from('icons').select('svg_content, thumbnail').eq('id', nested.iconId).single();
+                if (iconData?.svg_content) {
+                  const svgResult = await loadSVGFromString(iconData.svg_content, undefined, { crossOrigin: 'anonymous' });
+                  const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+                  // Set crossOrigin on image elements
+                  const setImageCrossOrigin = (obj: any) => {
+                    if (obj.type === 'image' || obj.type === 'Image') obj.set({ crossOrigin: 'anonymous' });
+                    if (obj._objects) obj._objects.forEach((child: any) => setImageCrossOrigin(child));
+                  };
+                  setImageCrossOrigin(tempGroup);
+                  const originalType = nested.originalType || 'group';
+                  if (originalType === 'group') {
+                    nested.objects = tempGroup.toObject().objects;
+                    nested.type = 'group';
+                  }
+                  count++;
+                }
+              } catch (error) {
+                count++;
+              }
+            }
+            if (nested.objects) {
+              count += await reconstructNestedIcons(nested.objects);
+            }
+          }
+          return count;
+        };
+
+        for (let i = 0; i < templateData.objects.length; i++) {
+          const objData = templateData.objects[i];
+
+          // Process membrane groups first
+          if (objData.isMembraneShape && objData.objects) {
+            const nestedCount = await reconstructNestedIcons(objData.objects);
+            loadedIcons += nestedCount;
+            if (iconCount > 0) {
+              setIconLoadingProgress(prev => (!prev || loadedIcons > prev.current) ? { current: loadedIcons, total: iconCount } : prev);
+            }
+          }
+
+          if (objData.type === 'libraryIcon' && objData.iconId) {
+            try {
+              const { data: iconData, error: iconError } = await supabase
+                .from('icons')
+                .select('svg_content')
+                .eq('id', objData.iconId)
+                .single();
+
+              if (iconError || !iconData?.svg_content) {
+                console.error(`Failed to load icon ${objData.iconId}:`, iconError);
+                continue;
+              }
+
+              const svgResult = await loadSVGFromString(iconData.svg_content);
+              const tempGroup = util.groupSVGElements(svgResult.objects, svgResult.options);
+
+              const originalType = objData.originalType || 'group';
+              if (originalType === 'group') {
+                const groupData = tempGroup.toObject();
+                objData.objects = groupData.objects;
+                objData.type = 'group';
+              } else if (originalType === 'path' && tempGroup._objects && tempGroup._objects[0]) {
+                const pathData = tempGroup._objects[0].toObject();
+                objData.path = pathData.path;
+                objData.type = 'path';
+              } else if (originalType === 'image') {
+                const groupData = tempGroup.toObject();
+                objData.objects = groupData.objects;
+                objData.type = 'group';
+              } else {
+                const groupData = tempGroup.toObject();
+                objData.objects = groupData.objects;
+                objData.type = 'group';
+              }
+
+              loadedIcons++;
+              if (iconCount > 0) {
+                setIconLoadingProgress(prev => {
+                  // Only update if new value is greater (prevent decrements)
+                  if (!prev || loadedIcons > prev.current) {
+                    return { current: loadedIcons, total: iconCount };
+                  }
+                  return prev;
+                });
+              }
+            } catch (error) {
+              console.error(`Error reconstructing icon ${objData.iconId}:`, error);
+              loadedIcons++;
+              if (iconCount > 0) {
+                setIconLoadingProgress(prev => {
+                  // Only update if new value is greater (prevent decrements)
+                  if (!prev || loadedIcons > prev.current) {
+                    return { current: loadedIcons, total: iconCount };
+                  }
+                  return prev;
+                });
+              }
+            }
+          }
+        }
+
+        if (iconCount > 0) {
+          setIconLoadingProgress(null);
+        }
+      }
+
+      await canvas.loadFromJSON(templateData);
+
+      // Manually restore custom properties
+      if (templateData.objects) {
+        const loadedObjects = canvas.getObjects();
+        templateData.objects.forEach((objData: any, index: number) => {
+          const obj = loadedObjects[index];
+          if (obj && objData) {
+            // Restore membrane shape properties FIRST (before bezier paths)
+            // Membranes store bezier points but should NOT be marked as isBezierPath
+            if (objData.isMembraneShape) {
+              (obj as any).isMembraneShape = true;
+              if (objData.membraneOptions) (obj as any).membraneOptions = objData.membraneOptions;
+              if (objData.bezierPoints) (obj as any).bezierPoints = objData.bezierPoints;
+              if (objData.worldBezierPoints) (obj as any).worldBezierPoints = objData.worldBezierPoints;
+              if (objData.isClosed !== undefined) (obj as any).isClosed = objData.isClosed;
+              if (objData.id) (obj as any).id = objData.id;
+
+              // Ensure group allows subTarget selection but icons are not individually selectable
+              obj.set({
+                subTargetCheck: true,
+                interactive: true,
+                objectCaching: false,
+              });
+
+              // Ensure all child icons are not selectable/evented (only group is)
+              if (obj.type === 'group' && (obj as any)._objects) {
+                (obj as any)._objects.forEach((icon: any) => {
+                  icon.set({
+                    selectable: false,
+                    evented: false,
+                  });
+                });
+              }
+
+              // Re-apply toObject override for membrane shapes
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'isMembraneShape',
+                  'membraneOptions',
+                  'bezierPoints',
+                  'worldBezierPoints',
+                  'isClosed',
+                  'id'
+                ]);
+              };
+            }
+            // Restore bezier path properties (but NOT for membrane shapes)
+            else if (objData.bezierPoints && !objData.isMembraneShape) {
+              obj.set('bezierPoints', objData.bezierPoints);
+              obj.set('isBezierPath', true);
+              obj.set('bezierPointsAreLocal', objData.bezierPointsAreLocal);
+
+              // Re-apply toObject override to ensure properties are serialized on future saves
+              const originalToObject = obj.toObject.bind(obj);
+              (obj as any).toObject = function(propertiesToInclude?: string[]) {
+                return originalToObject([
+                  ...(propertiesToInclude || []),
+                  'bezierPoints',
+                  'bezierPointsAreLocal',
+                  'isBezierPath',
+                  'id'
+                ]);
+              };
+            }
+            if (objData.isCurvedLine) {
+              obj.set('isCurvedLine', true);
+              if (objData.curvedLocalStart) obj.set('curvedLocalStart', objData.curvedLocalStart);
+              if (objData.curvedLocalEnd) obj.set('curvedLocalEnd', objData.curvedLocalEnd);
+              if (objData.curvedLocalControl) obj.set('curvedLocalControl', objData.curvedLocalControl);
+            }
+            if (objData.isMaskedImage) obj.set('isMaskedImage', true);
+            if (objData.isConnector) obj.set('isConnector', true);
+            // Restore icon reference properties
+            if (objData.iconId) obj.set('iconId', objData.iconId);
+            if (objData.isLibraryIcon) obj.set('isLibraryIcon', true);
+            // Restore icon styling properties (tone/tint)
+            if (objData.iconToneColor) (obj as any).iconToneColor = objData.iconToneColor;
+            if (objData.iconToneIntensity !== undefined) (obj as any).iconToneIntensity = objData.iconToneIntensity;
+            if (objData.iconToneHue !== undefined) (obj as any).iconToneHue = objData.iconToneHue;
+            if (objData.originalColors) {
+              // Convert serialized object back to Map
+              (obj as any).originalColors = new Map(Object.entries(objData.originalColors));
+            }
+          }
+        });
+      }
+
+      // Reload images with CORS to prevent tainting
+      reloadCanvasImagesWithCORS(canvas);
+
+      // Normalize all text fonts to use full font stacks (including text in groups)
+      normalizeCanvasTextFonts(canvas);
+
+      // Enhanced cleanup: Remove transient UI elements by flag AND visual appearance
+      const { cleanupOrphanHandles, reconnectCurvedLines } = await import('@/lib/curvedLineTool');
+      cleanupOrphanHandles(canvas);
+
+      // Reconnect all curved lines with their control handles
+      reconnectCurvedLines(canvas);
+
+      // Rasterize all membranes for performance
+      const { MembranePathTool } = await import('@/lib/membranePathTool');
+      const membranes = canvas.getObjects().filter((obj: any) => obj.isMembraneShape && !obj.isRasterizedMembrane);
+      for (const membrane of membranes) {
+        try {
+          const rasterized = await MembranePathTool.rasterizeMembrane(membrane as any);
+          canvas.remove(membrane);
+          canvas.add(rasterized);
+
+        } catch (error) {
+          console.error('[TEMPLATE] Failed to rasterize membrane:', error);
+        }
+      }
+      canvas.renderAll();
+
+      setProjectName(`Untitled from ${template.name}`);
+      setCurrentProjectId(null);
+      setPaperSize(template.paperSize);
+      setCanvasDimensions(template.dimensions);
+      canvas.setDimensions(template.dimensions);
+
+      // Increment version to trigger ruler/grid re-render
+      setCanvasLoadVersion(prev => prev + 1);
+
+      historyManager.current.clear();
+      saveState();
+      setSaveStatus('unsaved');
+      
+      toast.success(`Template "${template.name}" loaded!`);
+    } catch (error: any) {
+      console.error('Template load error:', error);
+      toast.error("Failed to load template");
+    }
+  }, [canvas, saveState]);
+
+
+  const duplicateSelected = useCallback(async () => {
+    if (!canvas || !selectedObject) return;
+
+    if (selectedObject.type === 'activeSelection') {
+      const activeSelection = selectedObject as ActiveSelection;
+      const objects = activeSelection.getObjects();
+      
+      const clones: FabricObject[] = [];
+      
+      for (const obj of objects) {
+        const cloned = await obj.clone();
+        cloned.set({
+          left: (cloned.left || 0) + 20,
+          top: (cloned.top || 0) + 20,
+        });
+        canvas.add(cloned);
+        clones.push(cloned);
+      }
+      
+      if (clones.length > 0) {
+        const selection = new ActiveSelection(clones, { canvas });
+        canvas.setActiveObject(selection);
+        canvas.requestRenderAll();
+        flashCanvas('success');
+        toast.success('Duplicated selection');
+        saveState();
+      }
+    } else {
+      const cloned = await selectedObject.clone();
+      cloned.set({
+        left: (cloned.left || 0) + 20,
+        top: (cloned.top || 0) + 20,
+      });
+      canvas.add(cloned);
+      canvas.setActiveObject(cloned);
+      canvas.requestRenderAll();
+      flashCanvas('success');
+      toast.success('Duplicated object');
+      saveState();
+    }
+  }, [canvas, selectedObject, saveState, flashCanvas]);
+
+  const pasteInPlace = useCallback(() => {
+    paste();
+  }, [paste]);
+
+  const deselectAll = useCallback(() => {
+    if (!canvas) return;
+    canvas.discardActiveObject();
+    canvas.requestRenderAll();
+  }, [canvas]);
+
+  const toggleLockSelected = useCallback(() => {
+    if (!canvas || !selectedObject) return;
+
+    const currentLocked = (selectedObject as any).pinned || false;
+    selectedObject.set({
+      pinned: !currentLocked,
+      selectable: currentLocked,
+      evented: currentLocked,
+    } as any);
+    canvas.requestRenderAll();
+    toast.success(currentLocked ? 'Unlocked object' : 'Locked object');
+    saveState();
+  }, [canvas, selectedObject, saveState]);
+
+  const hideSelected = useCallback(() => {
+    if (!canvas || !selectedObject) return;
+
+    selectedObject.set({ visible: false });
+    canvas.discardActiveObject();
+    canvas.requestRenderAll();
+    toast.success('Object hidden (Cmd+H to show all)');
+    saveState();
+  }, [canvas, selectedObject, saveState]);
+
+  const showAllHidden = useCallback(() => {
+    if (!canvas) return;
+
+    let count = 0;
+    canvas.getObjects().forEach((obj: FabricObject) => {
+      if (!obj.visible) {
+        obj.set({ visible: true });
+        count++;
+      }
+    });
+    canvas.requestRenderAll();
+    if (count > 0) {
+      toast.success(`Showed ${count} hidden object${count > 1 ? 's' : ''}`);
+      saveState();
+    }
+  }, [canvas, saveState]);
+
+  const rotateSelected = useCallback((degrees: number) => {
+    if (!canvas || !selectedObject) return;
+
+    const currentAngle = selectedObject.angle || 0;
+    selectedObject.rotate(currentAngle + degrees);
+    canvas.requestRenderAll();
+    saveState();
+  }, [canvas, selectedObject, saveState]);
+
+  const duplicateBelow = useCallback(async () => {
+    if (!canvas || !selectedObject) return;
+
+    const cloned = await selectedObject.clone();
+    const height = selectedObject.getScaledHeight();
+    cloned.set({
+      left: selectedObject.left,
+      top: (selectedObject.top || 0) + height + 20,
+    });
+    canvas.add(cloned);
+    canvas.setActiveObject(cloned);
+    canvas.requestRenderAll();
+    toast.success('Duplicated below');
+    saveState();
+  }, [canvas, selectedObject, saveState]);
+
+  // Helper to detect if object is a shape-with-text group
+  const isShapeWithTextGroup = (obj: any): boolean => {
+    if (obj.type !== 'group') return false;
+    const objects = obj.getObjects();
+    return objects.length === 2 && 
+           (objects[0].type === 'circle' || objects[0].type === 'rect') &&
+           objects[1].type === 'textbox';
+  };
+
+  // Helper to get the shape from a group
+  const getShapeFromGroup = (obj: any) => {
+    if (isShapeWithTextGroup(obj)) {
+      return obj.getObjects()[0]; // First object is the shape
+    }
+    return obj; // Return the object itself if not a group
+  };
+
+  // Gradient operations
+  const applyGradient = useCallback((config: GradientConfig, target: 'fill' | 'stroke') => {
+    if (!selectedObject || !canvas) return;
+    
+    const targetObj = getShapeFromGroup(selectedObject);
+    let gradient;
+    
+    if (config.type === 'linear') {
+      const angleRad = (config.angle * Math.PI) / 180;
+      const coords = {
+        x1: Math.cos(angleRad) * -50,
+        y1: Math.sin(angleRad) * -50,
+        x2: Math.cos(angleRad) * 50,
+        y2: Math.sin(angleRad) * 50,
+      };
+      gradient = new Gradient({
+        type: 'linear',
+        coords: coords,
+        colorStops: config.stops.map(stop => ({
+          offset: stop.offset,
+          color: stop.color,
+          opacity: stop.opacity || 1
+        }))
+      });
+    } else {
+      gradient = new Gradient({
+        type: 'radial',
+        coords: {
+          x1: config.centerX * 100,
+          y1: config.centerY * 100,
+          x2: config.centerX * 100,
+          y2: config.centerY * 100,
+          r1: 0,
+          r2: config.radius
+        },
+        colorStops: config.stops.map(stop => ({
+          offset: stop.offset,
+          color: stop.color,
+          opacity: stop.opacity || 1
+        }))
+      });
+    }
+    
+    targetObj.set(target, gradient);
+    canvas.requestRenderAll();
+    saveState();
+    toast.success(`Gradient applied to ${target}`);
+  }, [selectedObject, canvas, saveState]);
+
+  const clearGradient = useCallback((target: 'fill' | 'stroke') => {
+    if (!selectedObject || !canvas) return;
+    
+    const targetObj = getShapeFromGroup(selectedObject);
+    targetObj.set(target, '');
+    canvas.requestRenderAll();
+    saveState();
+    toast.success(`Gradient cleared from ${target}`);
+  }, [selectedObject, canvas, saveState]);
+
+  // Shadow operations
+  const applyShadow = useCallback((config: ShadowConfig) => {
+    if (!selectedObject || !canvas) return;
+    
+    if (config.enabled) {
+      const shadow = new Shadow({
+        color: config.color,
+        blur: config.blur,
+        offsetX: config.offsetX,
+        offsetY: config.offsetY,
+      });
+      // Manually set opacity by manipulating the color with alpha
+      const hexOpacity = Math.round(config.opacity * 255).toString(16).padStart(2, '0');
+      shadow.color = config.color + hexOpacity;
+      
+      selectedObject.set('shadow', shadow);
+      toast.success('Shadow applied');
+    } else {
+      selectedObject.set('shadow', null);
+      toast.success('Shadow removed');
+    }
+    
+    canvas.requestRenderAll();
+    saveState();
+  }, [selectedObject, canvas, saveState]);
+
+  const clearEffects = useCallback(() => {
+    if (!selectedObject || !canvas) return;
+
+    selectedObject.set('shadow', null);
+    canvas.requestRenderAll();
+    saveState();
+    toast.success('All effects cleared');
+  }, [selectedObject, canvas, saveState]);
+
+  // Image filter operations
+  const applyImageFilters = useCallback((config: ImageFilterConfig) => {
+    if (!selectedObject || !canvas) return;
+
+    // Only apply to images
+    if (selectedObject.type !== 'image' && !(selectedObject instanceof FabricImage)) {
+      toast.error('Please select an image first');
+      return;
+    }
+
+    const imageObj = selectedObject as FabricImage;
+
+    // Store filter config on the image object for persistence
+    (imageObj as any).imageFilters = config;
+
+    // Apply filters using the utility function
+    applyImageFiltersUtil(imageObj, config);
+
+    canvas.requestRenderAll();
+    saveState();
+    toast.success('Filters applied');
+  }, [selectedObject, canvas, saveState]);
+
+  const getImageFilters = useCallback((): ImageFilterConfig | null => {
+    if (!selectedObject || (selectedObject.type !== 'image' && !(selectedObject instanceof FabricImage))) {
+      return null;
+    }
+
+    const imageObj = selectedObject as any;
+    return imageObj.imageFilters || DEFAULT_IMAGE_FILTER_CONFIG;
+  }, [selectedObject]);
+
+  const clearImageFilters = useCallback(() => {
+    if (!selectedObject || !canvas) return;
+
+    if (selectedObject.type !== 'image' && !(selectedObject instanceof FabricImage)) {
+      return;
+    }
+
+    const imageObj = selectedObject as FabricImage;
+
+    // Clear filter config
+    (imageObj as any).imageFilters = DEFAULT_IMAGE_FILTER_CONFIG;
+
+    // Preserve tone filter if it exists, remove others
+    const existingFilters = imageObj.filters || [];
+    const toneFilter = existingFilters.find((f: any) => f.type === 'BlendColor');
+
+    imageObj.filters = toneFilter ? [toneFilter] : [];
+    imageObj.applyFilters();
+
+    canvas.requestRenderAll();
+    saveState();
+    toast.success('Filters cleared');
+  }, [selectedObject, canvas, saveState]);
+
+  // Background removal
+  const removeImageBackground = useCallback(async () => {
+    if (!canvas || !selectedObject || selectedObject.type !== 'image') {
+      toast.error('Please select an image first');
+      return;
+    }
+
+    const toastId = toast.loading('Loading AI model... This may take up to 30 seconds on first use.');
+    
+    try {
+      const imageObj = selectedObject as FabricImage;
+      const imageElement = imageObj.getElement() as HTMLImageElement;
+      
+      // Update toast to show processing
+      toast.loading('Processing image...', { id: toastId });
+      
+      // Remove background using existing library
+      const resultBlob = await removeBackground(imageElement);
+      
+      // Convert blob to data URL
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target?.result as string);
+        reader.readAsDataURL(resultBlob);
+      });
+      
+      // Create new image with transparent background
+      const newImg = await FabricImage.fromURL(dataUrl, { crossOrigin: 'anonymous' });
+      
+      // Preserve all properties from original
+      newImg.set({
+        left: imageObj.left,
+        top: imageObj.top,
+        scaleX: imageObj.scaleX,
+        scaleY: imageObj.scaleY,
+        angle: imageObj.angle,
+        opacity: imageObj.opacity,
+        flipX: imageObj.flipX,
+        flipY: imageObj.flipY,
+        originX: imageObj.originX,
+        originY: imageObj.originY,
+        lockMovementX: imageObj.lockMovementX,
+        lockMovementY: imageObj.lockMovementY,
+        selectable: imageObj.selectable,
+      });
+      
+      // Replace old image with new one at same z-index
+      const objects = canvas.getObjects();
+      const index = objects.indexOf(imageObj);
+      canvas.remove(imageObj);
+      if (index >= 0) {
+        canvas.insertAt(index, newImg);
+      } else {
+        canvas.add(newImg);
+      }
+      canvas.setActiveObject(newImg);
+      
+      canvas.renderAll();
+      saveState();
+      toast.dismiss(toastId);
+      toast.success('Background removed successfully! ✨');
+    } catch (error: any) {
+      console.error('Background removal failed:', error);
+      toast.dismiss(toastId);
+      const errorMsg = error?.message || 'Failed to remove background';
+      toast.error(errorMsg, { duration: 5000 });
+    }
+  }, [selectedObject, canvas, saveState]);
+
+  // Line gradient operations
+  const applyLineGradient = useCallback((config: LineGradientConfig) => {
+    if (!selectedObject || !canvas) return;
+    
+    const isConnectorGroup =
+      selectedObject.type === 'group' && (selectedObject as any).connectorData;
+
+    // Check if it's a line/connector/curved line
+    const isLine =
+      isConnectorGroup ||
+      (selectedObject as any).isConnector ||
+      (selectedObject as any).isCurvedLine ||
+      (selectedObject as any).isOrthogonalLine ||
+      (selectedObject as any).isStraightLine ||
+      selectedObject.type === 'path' ||
+      selectedObject.type === 'line';
+    
+    if (!isLine) {
+      toast.error('Please select a line or connector');
+      return;
+    }
+
+    // Get the target object (path inside group or the object itself)
+    let targetObj: any = selectedObject;
+    if (selectedObject.type === 'group') {
+      const group = selectedObject as Group;
+      // For curved lines, use mainPath property
+      if ((selectedObject as any).mainPath) {
+        targetObj = (selectedObject as any).mainPath;
+      } else {
+        // For orthogonal/straight lines and connectors, find the path or line
+        targetObj =
+          group._objects?.find(obj => obj.type === 'path' || obj.type === 'line') ||
+          group._objects?.[0];
+      }
+    }
+
+    if (!targetObj) {
+      toast.error('Invalid line object');
+      return;
+    }
+
+    // Store gradient config on both the selected wrapper and the actual drawable object
+    (selectedObject as any).gradientConfig = config;
+    (targetObj as any).gradientConfig = config;
+
+    // Get the path's bounding box for pixel-based gradient calculation
+    const pathBounds = targetObj._getTransformedDimensions();
+
+    // Calculate gradient coordinates based on the path's local dimensions
+    // For paths, we use the path's own coordinate system
+    let gradientCoords: { x1: number; y1: number; x2: number; y2: number };
+
+    // Get the path's width and height
+    const width = pathBounds.x || targetObj.width || 100;
+    const height = pathBounds.y || targetObj.height || 2;
+
+    // Determine if it's more horizontal or vertical
+    const isHorizontal = width >= height;
+
+    if (isHorizontal) {
+      // Gradient flows left-to-right (or right-to-left if reversed)
+      gradientCoords = {
+        x1: config.direction === 'reverse' ? width / 2 : -width / 2,
+        y1: 0,
+        x2: config.direction === 'reverse' ? -width / 2 : width / 2,
+        y2: 0,
+      };
+    } else {
+      // Gradient flows top-to-bottom (or bottom-to-top if reversed)
+      gradientCoords = {
+        x1: 0,
+        y1: config.direction === 'reverse' ? height / 2 : -height / 2,
+        x2: 0,
+        y2: config.direction === 'reverse' ? -height / 2 : height / 2,
+      };
+    }
+
+    const gradient = new Gradient({
+      type: 'linear',
+      gradientUnits: 'pixels',
+      coords: gradientCoords,
+      colorStops: config.stops.map(stop => ({
+        offset: stop.offset,
+        color: stop.color,
+        opacity: stop.opacity ?? 1,
+      })),
+    });
+
+    // Apply gradient to stroke
+    targetObj.set('stroke', gradient);
+    targetObj.set('dirty', true);
+    
+    // Also mark parent group as dirty if applicable
+    if (selectedObject.type === 'group') {
+      (selectedObject as Group).set('dirty', true);
+    }
+
+    canvas.requestRenderAll();
+    saveState();
+    toast.success('Line gradient applied');
+  }, [selectedObject, canvas, saveState]);
+
+  const clearLineGradient = useCallback(() => {
+    if (!selectedObject || !canvas) return;
+    
+    // Determine target object
+    let targetObj: any = selectedObject;
+    if (selectedObject.type === 'group') {
+      const group = selectedObject as Group;
+      targetObj =
+        group._objects?.find(obj => obj.type === 'path' || obj.type === 'line') ||
+        group._objects?.[0];
+    }
+
+    if (!targetObj) {
+      return;
+    }
+
+    // Remove gradient config
+    delete (selectedObject as any).gradientConfig;
+    delete (targetObj as any).gradientConfig;
+
+    // Reset to solid color (use connector data or existing stroke)
+    const connectorData =
+      (targetObj as any).connectorData || (selectedObject as any).connectorData;
+    const defaultColor =
+      connectorData?.strokeColor ||
+      (typeof targetObj.stroke === 'string' ? targetObj.stroke : '#000000');
+
+    targetObj.set('stroke', defaultColor);
+    targetObj.set('dirty', true);
+
+    if (selectedObject.type === 'group') {
+      (selectedObject as Group).set('dirty', true);
+    }
+
+    canvas.requestRenderAll();
+    saveState();
+    toast.success('Line gradient cleared');
+  }, [selectedObject, canvas, saveState]);
+
+  // Exit bezier edit mode
+  const exitBezierEditMode = useCallback(() => {
+    if (bezierEditModeRef.current && canvas) {
+      bezierEditModeRef.current.deactivate();
+      // Explicitly clear the path ref to prevent stale references
+      bezierEditModeRef.current.path = null;
+      setIsBezierEditMode(false);
+      setEditingBezierPath(null);
+      // Extra render call to ensure handles are visually removed
+      canvas.requestRenderAll();
+      toast.success("Edit mode exited");
+    }
+  }, [canvas]);
+
+  // Exit curved line edit mode
+  const exitCurvedLineEditMode = useCallback(() => {
+    if (curvedLineEditModeRef.current && canvas) {
+      curvedLineEditModeRef.current.deactivate();
+      setIsCurvedLineEditMode(false);
+      setEditingCurvedLine(null);
+      // Extra render call to ensure handles are visually removed
+      canvas.requestRenderAll();
+      toast.success("Edit mode exited");
+    }
+  }, [canvas]);
+
+  const exitImageEditMode = useCallback(() => {
+    if (canvas) {
+      // Get the current masked image group - either from ref or from selected object
+      const group = imageEditModeRef.current || (selectedObject?.type === 'group' && (selectedObject as any).isMaskedImage ? selectedObject as Group : null);
+      if (group) {
+        exitImageEditModeFn(canvas, group, setIsImageEditMode);
+        imageEditModeRef.current = null;
+        setEditingMaskedImage(null);
+      } else {
+        // Fallback - just clear the mode
+        setIsImageEditMode(false);
+        toast.info("Edit mode exited");
+      }
+    } else {
+    }
+  }, [canvas, selectedObject]);
+
+  // Auto-exit image edit mode when selection changes
+  useEffect(() => {
+    if (isImageEditMode && imageEditModeRef.current) {
+      const group = imageEditModeRef.current;
+      const extractedImage = (group as any).extractedImage;
+
+      // Allow selection to be either the group OR the extracted image
+      const isValidSelection = selectedObject === group || selectedObject === extractedImage;
+
+      // If selection changed to a different object (or cleared), exit edit mode
+      if (!selectedObject || !isValidSelection) {
+        exitImageEditMode();
+      }
+    }
+  }, [selectedObject, isImageEditMode, exitImageEditMode]);
+
+  // Exit membrane edit mode
+  const exitMembraneEditMode = useCallback(async () => {
+
+    if (membraneEditModeRef.current && canvas) {
+
+      const newMembraneGroup = await membraneEditModeRef.current.deactivate();
+
+      setIsMembraneEditMode(false);
+      setMembraneEditTab('line'); // Reset to line tab when exiting
+      membraneEditModeRef.current = null;
+
+      // Update the editing membrane reference to the new group
+      if (newMembraneGroup) {
+        setEditingMembrane(newMembraneGroup);
+      } else {
+        setEditingMembrane(null);
+      }
+
+      canvas.requestRenderAll();
+
+      toast.success("Membrane edit mode exited");
+    } else {
+
+    }
+  }, [canvas]);
+
+  const value: CanvasContextType = {
+    canvas,
+    setCanvas,
+    selectedObject,
+    setSelectedObject,
+    firstSelectedObjectRef,
+    zoom,
+    setZoom,
+    backgroundColor,
+    setBackgroundColor,
+    backgroundGradient,
+    setBackgroundGradient,
+    gradientStartColor,
+    setGradientStartColor,
+    gradientEndColor,
+    setGradientEndColor,
+    gradientType,
+    setGradientType,
+    gradientAngle,
+    setGradientAngle,
+    gradientCenterX,
+    setGradientCenterX,
+    gradientCenterY,
+    setGradientCenterY,
+    gradientRadius,
+    setGradientRadius,
+    canvasDimensions,
+    setCanvasDimensions,
+    paperSize,
+    setPaperSize,
+    canvasLoadVersion,
+    setCanvasLoadVersion,
+    customDimensions,
+    setCustomDimensions,
+    currentProjectId,
+    setCurrentProjectId,
+    projectOwnerId,
+    projectName,
+    setProjectName,
+    isSaving,
+    isLoadingProject,
+    iconLoadingProgress,
+    saveProject,
+    loadProject,
+    saveStatus,
+    undo,
+    redo,
+    beginHistoryTransaction,
+    commitHistoryTransaction,
+    cancelHistoryTransaction,
+    saveStateWithLabel,
+    cut,
+    copy,
+    paste,
+    deleteSelected,
+    selectAll,
+    hasClipboardContent: clipboard !== null,
+    zoomIn,
+    zoomOut,
+    zoomToFit,
+    resetZoom,
+    setCustomZoom,
+    alignLeft,
+    alignCenter,
+    alignRight,
+    alignTop,
+    alignMiddle,
+    alignBottom,
+    distributeHorizontally,
+    distributeVertically,
+    distributionSpacing,
+    setDistributionSpacing,
+    matchWidth,
+    matchHeight,
+    flipHorizontal,
+    flipVertical,
+    bringToFront,
+    sendToBack,
+    bringForward,
+    sendBackward,
+    groupSelected,
+    ungroupSelected,
+    exportAsPNG,
+    exportAsPNGTransparent,
+    exportAsJPG,
+    exportAsSVG,
+    exportAsPDF,
+    cleanExport,
+    exportDialogOpen,
+    setExportDialogOpen,
+    textFont,
+    setTextFont,
+    textAlign,
+    setTextAlign,
+    textUnderline,
+    setTextUnderline,
+    textOverline,
+    setTextOverline,
+    textBold,
+    setTextBold,
+    textItalic,
+    setTextItalic,
+    textListType,
+    setTextListType,
+    textSubscript,
+    setTextSubscript,
+    textSuperscript,
+    setTextSuperscript,
+    pinObject,
+    unpinObject,
+    togglePin,
+    isPinned,
+    getCanvasObjects,
+    selectObjectById,
+    toggleObjectVisibility,
+    toggleObjectLock,
+    reorderObjects,
+    cropMode,
+    setCropMode,
+    cropImage,
+    resetCrop,
+    smoothenPath,
+    nudgeObject,
+    saveState,
+    recentColors,
+    addToRecentColors,
+    flashCanvas,
+    recoverCanvas,
+    checkForRecovery,
+    duplicateSelected,
+    pasteInPlace,
+    deselectAll,
+    toggleLockSelected,
+    hideSelected,
+    showAllHidden,
+    rotateSelected,
+    duplicateBelow,
+    loadTemplate,
+    applyGradient,
+    clearGradient,
+    applyShadow,
+    clearEffects,
+    applyImageFilters,
+    getImageFilters,
+    clearImageFilters,
+    removeImageBackground,
+    applyLineGradient,
+    clearLineGradient,
+    isBezierEditMode,
+    setIsBezierEditMode,
+    bezierEditModeRef,
+    editingBezierPath,
+    setEditingBezierPath,
+    exitBezierEditMode,
+    isCurvedLineEditMode,
+    setIsCurvedLineEditMode,
+    curvedLineEditModeRef,
+    editingCurvedLine,
+    setEditingCurvedLine,
+    exitCurvedLineEditMode,
+    isImageEditMode,
+    setIsImageEditMode,
+    imageEditModeRef,
+    editingMaskedImage,
+    setEditingMaskedImage,
+    exitImageEditMode,
+    isMembraneEditMode,
+    setIsMembraneEditMode,
+    membraneEditModeRef,
+    editingMembrane,
+    setEditingMembrane,
+    exitMembraneEditMode,
+    membraneEditTab,
+    setMembraneEditTab,
+    isReadOnly,
+    setIsReadOnly,
+    loadSharedProject,
+  };
+
+  // Expose context to window for E2E testing
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const gridRulerState = useGridAndRulerStore.getState();
+      (window as any).canvasContext = {
+        ...value,
+        // Include grid/ruler for backward compatibility and snap-to-grid
+        gridEnabled: gridRulerState.gridEnabled,
+        rulersEnabled: gridRulerState.rulersEnabled,
+        snapToGrid: gridRulerState.snapToGrid,
+        gridSize: gridRulerState.gridSize,
+        gridPattern: gridRulerState.gridPattern,
+      };
+    }
+  }, [value]);
+
+  // Subscribe to grid/ruler store changes to keep window.canvasContext in sync
+  useEffect(() => {
+    const unsubscribe = useGridAndRulerStore.subscribe((state) => {
+      if (typeof window !== 'undefined' && (window as any).canvasContext) {
+        (window as any).canvasContext.snapToGrid = state.snapToGrid;
+        (window as any).canvasContext.gridSize = state.gridSize;
+        (window as any).canvasContext.gridEnabled = state.gridEnabled;
+        (window as any).canvasContext.rulersEnabled = state.rulersEnabled;
+        (window as any).canvasContext.gridPattern = state.gridPattern;
+      }
+    });
+
+    return unsubscribe;
+  }, []);
+
+  return <CanvasContext.Provider value={value}>{children}</CanvasContext.Provider>;
+};

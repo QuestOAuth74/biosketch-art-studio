@@ -1,0 +1,313 @@
+Science Canvas Creator - Development Milestones Summary
+
+Date: 1 February 2026
+Total Price: $5,995 USD
+Total Timeline: 5-9 weeks
+
+Milestone 1: Core Improvements & Bug Fixes - $950 - 1-2 weeks
+Milestone 2: Line & Connector System Overhaul - $1,450 - 1-2 weeks
+Milestone 3: Collaboration Features - $1,450 - 1-2 weeks
+Milestone 4: SciSketch AI Integration - $2,145 - 2-3 weeks
+
+================================================================================
+
+Milestone 1: Core Improvements & Bug Fixes
+Price: $950
+Timeline: 1-2 weeks
+
+Milestone details can be found in the `project_quote_2-Feb-26.pdf` file shared via upwork messaging
+
+Deliverables:
+
+Canvas Performance Optimization
+- Smooth object manipulation with 50+ icons on canvas without lag
+- Eliminate "PROJECT TOO LARGE TO SAVE" error for projects up to 100+ icons
+- Optimized membrane tool performance with 30+ repeated icons
+- Project data compression reducing storage footprint
+
+SVG Upload Fix
+- Newly uploaded SVG icons render correctly on canvas
+- All SVG formats display with proper colors and sizing
+- Comprehensive error handling for failed uploads
+
+Canvas Size Template Fix
+- Canvas dimensions update correctly when templates are selected
+- Canvas size persists after template selection and project reload
+
+Paginated Icon Display
+- 20 icons per page with Previous/Next pagination controls
+- Page number indicator and total icon count display
+- Preserved pagination state when switching categories
+
+Enhanced Search with Tagging
+- Icon search across both names and tags with partial word matching
+- Unified search results view from all categories
+- Search result relevance sorting (exact name match > tag match > partial match)
+
+Admin Tag Management System
+- CSV export of all icons with current tags
+- CSV import for bulk tag updates with preview
+- Individual icon tag editing in admin interface
+- Tag auto-suggestions and usage statistics
+
+Three Crop Modes
+- Free-form crop with adjustable anchor points (similar to bezier line edit mode)
+- Square crop with optional 1:1 aspect ratio lock
+- Circle crop with optional 1:1 aspect ratio lock
+- All crop modes have translucent background outside crop area
+- Crop mode buttons accessible in Properties panel when image selected
+- Edit Crop and Reset to Original options for cropped images
+
+Non-Destructive Cropping
+- Original image data preserved
+- Crop editable after application
+- Cropped state persists through save/load cycles
+
+Tests:
+
+Unit Tests
+- Search algorithm: exact name match ranks higher than tag match, partial word matching works, case-insensitive
+- Crop calculations: polygon crop produces valid clipPath, circle/square maintain 1:1 aspect ratio during resize
+
+End-to-end Tests
+- SVG upload: upload icon via admin → appears in library → click icon → appears on canvas
+- Canvas size templates: select template → canvas resizes → save/reload → size persists
+- Pagination: category with >20 icons shows 20 initially → Next/Previous navigation works → page indicator correct
+- Enhanced search: search exact name/partial word/tag → results appear → relevance sorting works
+- Admin tagging: export CSV → edit tags → import CSV → tags update → appear in search
+- Cropping: select image → apply crop (free-form/circle/square) → edit crop → reset to original → save/reload → crop persists
+
+Manual Tests
+- Performance: 50 icons drag smoothly, 100+ icons save without 4MB error, 200 icons stress test >30fps
+- SVG upload: complex SVGs render correctly with proper colors and sizing
+- Crop tool UX: anchor points easy to grab, preview overlay clear, all crop types produce clean edges
+
+================================================================================
+
+Milestone 2: Line & Connector System Overhaul
+Price: $1,450
+Timeline: 1-2 weeks
+
+Milestone details can be found in the `project_quote_2-Feb-26.pdf` file shared via upwork messaging
+
+Deliverables:
+
+Consolidated Line Toolbar
+- Three dedicated line tool buttons: Straight Line, Curved Line, Orthogonal Line
+- Pen tool and freehand tool remain unchanged
+- Removal of fragmented line dropdowns and multiple connector tools
+
+Smart Connector Point System
+- When line tool active, objects display connection points at corners and side mid-points
+- Clicking connection point attaches line to object
+- Snap-to-attach: dragging line endpoint near connection point automatically snaps and attaches
+- Snap-to-detach: dragging attached endpoint away detaches it
+- Moving attached objects maintains line connections automatically
+- Smart connector system can be toggled on/off in properties panel
+
+Automatic Pathfinding for Orthogonal Lines
+- "Smart connectors" option enables orthogonal/bezier lines to automatically route around obstacles
+- Pathfinding algorithm calculates optimal path avoiding other objects
+- Dynamic rerouting when obstacles are moved
+- Manual override: users can disable auto-routing and manually position anchor points
+
+Line Edit Mode
+- Double-click any placed line to enter edit mode (excluding freehand lines)
+- In edit mode: reposition anchor points and adjust curves
+- Connection points on other objects remain visible during edit mode
+- Click outside line or press Escape to exit edit mode
+
+Intelligent Line Type Conversion
+- Properties panel shows line type selector when line is selected
+- 2-anchor lines can convert to: straight, curved, orthogonal, or bezier
+- 3+-anchor lines can convert to: orthogonal or bezier only
+
+Customizable Line Endpoints
+- Six endpoint options for start and end: None, Arrow, Circle (hollow/filled), Dot, Diamond (hollow/filled), Inhibitor bar
+- Visual endpoint preview in Properties panel
+
+Fixed Line Gradient System
+- Line gradient defaults to "fade in" with "reverse" direction
+- Arrows display correctly with gradient applied
+- Gradient controls: fade in/out, direction toggle, opacity start/end sliders
+
+Advanced Line Styling
+- Line weight slider and presets selector
+- Dash pattern options (solid, dashed, dotted, custom)
+- Corner style for orthogonal lines (sharp, rounded, beveled)
+
+Tests:
+
+Unit Tests
+- Pathfinding calculates routes avoiding obstacles, returns direct route when no obstacles, fallback when no path exists
+- Line type conversion: 2-anchor converts to any type, maintains object attachments
+- Endpoints render with correct orientation on straight, curved, and orthogonal lines
+
+Manual Tests
+- Toolbar shows three line tools, old dropdowns removed
+- Connection points visible on all object types when line tool active
+- Line editing works smoothly for all line types
+- All six endpoint types render correctly
+- Gradients apply correctly with endpoints
+- Pathfinding handles obstacles and reroutes dynamically
+- Export preserves all line styling, endpoints, and connections
+
+================================================================================
+
+Milestone 3: Collaboration Features
+Price: $1,450
+Timeline: 1-2 weeks
+
+Milestone details can be found in the `project_quote_2-Feb-26.pdf` file shared via upwork messaging
+
+Deliverables:
+
+Group Account System
+- Group creation and management interface
+- Member invitation system with email notifications
+- Group member roles (owner, admin, member) with appropriate permissions
+
+Lab Member Invitation System
+- Email-based invitation flow with unique token links
+- 7-day invitation expiration
+- Invitation management (resend, cancel, history)
+
+Project Pages System
+- Personal and group project pages for organizing collections
+- Shareable project page URLs
+
+Real-time Collaborative Editing
+- Project sharing with specific members or entire groups
+- Permission levels (View Only, Edit Access)
+- Real-time presence system showing who is currently viewing/editing
+- Live cursor tracking and user avatars on canvas
+- Operation-based sync (broadcast object-property changes, not full state)
+- Automatic conflict resolution: last-write-wins at property level, no user intervention
+- Manual project locking (admin/owner only) for maintenance or sensitive work
+
+Canvas Comment System
+- Comment pins placed on canvas at specific locations
+- Threaded comment conversations
+- Resolve/unresolve functionality
+- Comment filtering (All, Unresolved, Resolved)
+
+Email Notifications
+- Notifications for invitations, collaborator additions, new comments, and comment replies
+
+Tests:
+
+Unit Tests
+- Group creation creates owner role, invitation tokens unique and expire after 7 days
+- Presence tracking adds/removes users on join/leave, operations broadcast to all clients
+- Last-write-wins uses timestamps correctly for same-property conflicts
+- Users can only access groups they belong to, only owners/admins can modify membership
+- Project collaborators can access shared projects based on permission level
+
+End-to-end Tests
+- Group management: create group → invite member → member accepts → member joins
+- Project sharing: share with Edit permission → collaborator can edit, share View Only → collaborator cannot edit
+- Real-time collaboration: two users open same project → see each other's avatars → user moves object → other sees it move in real-time → both edit different objects → both changes apply → both edit same property → latest change wins
+- Cursor tracking: user moves cursor → other users see cursor position with name label, user selects object → others see selection highlight
+- Manual locking: admin locks project → users see locked status and cannot edit → admin unlocks → users can edit
+- Comments: click canvas → add comment → comment appears → reply → resolve → filter comments
+
+Manual Tests
+- Cursor tracking and canvas updates feel instant (<100ms)
+- Multiple users editing simultaneously without lag
+- Collaboration feels seamless with automatic conflict resolution
+- Comment system is intuitive
+
+================================================================================
+
+Milestone 4: SciSketch AI Integration
+Price: $2,145
+Timeline: 2-3 weeks
+
+Milestone details can be found in the `project_quote_2-Feb-26.pdf` file shared via upwork messaging
+
+Deliverables:
+
+AI Diagram Generation from Text
+- Paste scientific abstract or text description into dialog
+- AI extracts biological entities (8 types: proteins, molecules, cells, enzymes, organs, pathways, processes, structures)
+- AI detects relationships between entities (6 types: activation, inhibition, conversion, transport, binding, generic arrows)
+- Multi-step progress indicators during generation
+
+Smart Icon Matching System
+- 3-tier icon matching: exact match → category match → generic fallback
+- 1,000+ biological icons classified and tagged for accurate matching
+- Icon thumbnails shown in preview with tier indicators
+- Admin tools for bulk icon classification via CSV import/export
+
+Automatic Layout Generation
+- Three layout algorithms: hierarchical (pathways), force-directed (networks), circular (feedback loops)
+- Algorithm automatically selected based on diagram structure
+- Generates positioned, non-overlapping diagrams ready for canvas
+
+Preview & Edit Interface
+- Review extracted entities and relationships before finalizing
+- Edit entity names and types
+- Add/remove entities or relationships
+- Choose alternative icons from matching options
+- Modify relationship types (e.g., change activation to inhibition)
+
+Canvas Integration
+- Generated diagrams appear as fully editable canvas objects
+- Icons, connectors, and labels can be moved, resized, and styled
+- Connectors attach to icons dynamically (move icon, connector follows)
+- Biological relationship markers (activation arrows, inhibition bars, etc.)
+- Generated diagrams save and export like any other canvas project
+
+Dual LLM Support
+- OpenAI GPT-4 and Google Gemini API support
+- Structured JSON output for reliable parsing
+- Automatic retry on timeouts and errors
+- Graceful fallbacks for API failures
+
+Cost Management
+- Pre-generation cost estimates shown to user
+- Token usage tracking per diagram
+- Monthly usage dashboard for admins
+- Rate limiting (3 concurrent generations per user)
+- Optional user quotas configurable by admin
+
+Tests:
+
+Unit Tests
+- Entity extraction returns valid JSON with all 8 entity types
+- Relationship detection identifies all 6 types correctly
+- Icon matching uses 3-tier system: exact → category → generic
+- Layout algorithms avoid overlapping nodes
+- Error handling works for timeouts, malformed responses, missing icons
+- Generated icons appear at correct positions, connectors attach dynamically
+- All 6 relationship types render with correct biological markers
+
+End-to-end Tests
+- Paste scientific text → Generate → preview shows entities and relationships → Generate Layout → canvas shows positioned diagram → elements editable and persist on save/reload
+- Preview & edit: edit entity name/type → updates, add/remove entities/relationships → updates
+- Icon matching: all entities have valid icons (no missing)
+- Error handling: empty text → validation error, non-biological text → "No entities found", API failure → retry option
+
+Manual Tests
+- AI quality: entity extraction accuracy, relationship detection accuracy, icon matching quality (well-known entities get appropriate tier 1 icons), all 6 relationship types render with correct markers (visual verification), layout produces readable logical diagrams
+- User experience: generation completes in <30 seconds, cost estimates accurate, preview interface intuitive, generated diagrams look publication-ready
+
+================================================================================
+
+Notes
+
+Development Database: Independently owned development database provided for testing. Migrations and configurations deployed to client's production database when milestones submitted.
+
+GitHub Repository: Project cloned to independent private repository for development. Changes pushed to production repository when milestones submitted.
+
+Preview Deployment: Preview deployment connected to development database provided with first milestone, updated via continuous deployment.
+
+API Credentials: Independent API keys provided for development (Resend, OpenAI, etc.). Production accounts and keys provided by client.
+
+Delivery Report: Comprehensive test results and work description provided when each milestone submitted.
+
+Post-Delivery Support: Ongoing support, bug fixes, and issue resolution provided for all unaltered code and database infrastructure within completed milestone scope.
+
+Milestone Scope: Each milestone complete when all Deliverables and Tasks implemented and all Tests pass.
+
+Contract Completion: Completion of all tasks in all milestones constitutes contract completion. Additional milestones can be added by mutual agreement.

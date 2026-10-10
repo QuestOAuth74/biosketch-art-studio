@@ -1,0 +1,65 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/blog/:slug",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(Googlebot|bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|Discordbot|Slackbot|Applebot|PinterestBot).*"
+        }
+      ],
+      "destination": "/api/prerender?path=/blog/:slug"
+    },
+    {
+      "source": "/icons/:id",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(Googlebot|bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|Discordbot|Slackbot|Applebot|PinterestBot).*"
+        }
+      ],
+      "destination": "/api/prerender?path=/icons/:id"
+    },
+    {
+      "source": "/blog",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(Googlebot|bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|Discordbot|Slackbot|Applebot|PinterestBot).*"
+        }
+      ],
+      "destination": "/api/prerender?path=/blog"
+    },
+    {
+      "source": "/icons",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(Googlebot|bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|Discordbot|Slackbot|Applebot|PinterestBot).*"
+        }
+      ],
+      "destination": "/api/prerender?path=/icons"
+    },
+    {
+      "source": "/community",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(Googlebot|bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|TelegramBot|Discordbot|Slackbot|Applebot|PinterestBot).*"
+        }
+      ],
+      "destination": "/api/prerender?path=/community"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

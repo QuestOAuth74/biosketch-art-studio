@@ -1,0 +1,165 @@
+[build]
+  publish = "dist"
+
+# Bump Node's old-space heap so Vite/Rollup can finish bundling without OOM
+# (default ≈ 1.5 GB → 4 GB). The medical-models 3D viewer + three.js + drei
+# additions pushed the production bundle past the default ceiling.
+[build.environment]
+  NODE_OPTIONS = "--max-old-space-size=4096"
+
+# Dynamic sitemap — serves blog posts, icons, and author pages from database
+[[edge_functions]]
+  function = "sitemap"
+  path = "/sitemap.xml"
+
+# Edge function for bot prerendering (serves SEO HTML to crawlers)
+[[edge_functions]]
+  function = "prerender"
+  path = "/"
+[[edge_functions]]
+  function = "prerender"
+  path = "/contact"
+[[edge_functions]]
+  function = "prerender"
+  path = "/testimonials"
+[[edge_functions]]
+  function = "prerender"
+  path = "/release-notes"
+[[edge_functions]]
+  function = "prerender"
+  path = "/terms"
+[[edge_functions]]
+  function = "prerender"
+  path = "/author/*"
+[[edge_functions]]
+  function = "prerender"
+  path = "/tools"
+[[edge_functions]]
+  function = "prerender"
+  path = "/community"
+[[edge_functions]]
+  function = "prerender"
+  path = "/icons"
+[[edge_functions]]
+  function = "prerender"
+  path = "/icons/*"
+[[edge_functions]]
+  function = "prerender"
+  path = "/blog"
+[[edge_functions]]
+  function = "prerender"
+  path = "/blog/*"
+[[edge_functions]]
+  function = "prerender"
+  path = "/volcano-plot"
+[[edge_functions]]
+  function = "prerender"
+  path = "/scatter-plot"
+[[edge_functions]]
+  function = "prerender"
+  path = "/dose-response"
+[[edge_functions]]
+  function = "prerender"
+  path = "/kaplan-meier"
+[[edge_functions]]
+  function = "prerender"
+  path = "/enzyme-kinetics"
+[[edge_functions]]
+  function = "prerender"
+  path = "/gel-electrophoresis"
+[[edge_functions]]
+  function = "prerender"
+  path = "/heatmap"
+[[edge_functions]]
+  function = "prerender"
+  path = "/phylo-tree"
+[[edge_functions]]
+  function = "prerender"
+  path = "/pedigree"
+[[edge_functions]]
+  function = "prerender"
+  path = "/gantt"
+[[edge_functions]]
+  function = "prerender"
+  path = "/smiles"
+[[edge_functions]]
+  function = "prerender"
+  path = "/latex"
+[[edge_functions]]
+  function = "prerender"
+  path = "/protein-domains"
+[[edge_functions]]
+  function = "prerender"
+  path = "/chromosome-ideogram"
+[[edge_functions]]
+  function = "prerender"
+  path = "/genetic-code-wheel"
+[[edge_functions]]
+  function = "prerender"
+  path = "/buffer-calculator"
+[[edge_functions]]
+  function = "prerender"
+  path = "/punnett-square"
+[[edge_functions]]
+  function = "prerender"
+  path = "/molecular-weight"
+[[edge_functions]]
+  function = "prerender"
+  path = "/unit-converter"
+[[edge_functions]]
+  function = "prerender"
+  path = "/plasmid-viewer"
+[[edge_functions]]
+  function = "prerender"
+  path = "/dna-tools"
+[[edge_functions]]
+  function = "prerender"
+  path = "/dilution-calculator"
+[[edge_functions]]
+  function = "prerender"
+  path = "/box-whisker-plot"
+[[edge_functions]]
+  function = "prerender"
+  path = "/bar-chart"
+[[edge_functions]]
+  function = "prerender"
+  path = "/violin-plot"
+[[edge_functions]]
+  function = "prerender"
+  path = "/correlation-matrix"
+[[edge_functions]]
+  function = "prerender"
+  path = "/forest-plot"
+[[edge_functions]]
+  function = "prerender"
+  path = "/roc-curve"
+[[edge_functions]]
+  function = "prerender"
+  path = "/venn-diagram"
+[[edge_functions]]
+  function = "prerender"
+  path = "/sankey-diagram"
+[[edge_functions]]
+  function = "prerender"
+  path = "/ai-illustrator"
+[[edge_functions]]
+  function = "prerender"
+  path = "/free-ai-credits"
+[[edge_functions]]
+  function = "prerender"
+  path = "/ci-proportion"
+[[edge_functions]]
+  function = "prerender"
+  path = "/chi-square"
+[[edge_functions]]
+  function = "prerender"
+  path = "/chart-studio-intro"
+[[edge_functions]]
+  function = "prerender"
+  path = "/shared/*"
+
+# SPA fallback — must come after edge functions
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

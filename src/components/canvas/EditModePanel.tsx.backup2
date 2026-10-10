@@ -1,0 +1,1007 @@
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { useCanvas } from "@/contexts/CanvasContext";
+import { BezierPath } from "@/types/bezier";
+import { MembraneEditState } from "@/lib/membraneEditMode";
+import { toast } from "sonner";
+import {
+  CheckCircleIcon,
+  CircleIcon,
+  SquareIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import { Search, Loader2, ChevronLeft, ChevronRight, Minus, Image } from "lucide-react";
+import { util, Point as FabricPoint, loadSVGFromString, Group as FabricGroup } from "fabric";
+import { supabase } from "@/integrations/supabase/client";
+import { useQuery } from "@tanstack/react-query";
+import { sanitizeSVG } from "@/lib/utils";
+import React from "react";
+
+export const EditModePanel = () => {
+  // Force re-render mechanism for membrane edit mode
+  const [, forceUpdate] = React.useReducer(x => x + 1, 0);
+
+  // Track newly added icons in icon mode (these are the only editable icons)
+  const [newAddedIcons, setNewAddedIcons] = React.useState<any[]>([]);
+
+  // Loading state for Done Editing button
+  const [isExiting, setIsExiting] = React.useState(false);
+
+  // Icon selector state for adding new icons in icon tab
+  const [iconSearchQuery, setIconSearchQuery] = React.useState("");
+  const [membraneOnlyFilter, setMembraneOnlyFilter] = React.useState(true);
+  const [iconPage, setIconPage] = React.useState(0);
+  const [loadedIcons, setLoadedIcons] = React.useState<any[]>([]);
+  const [totalIconCount, setTotalIconCount] = React.useState(0);
+  const ICONS_PER_PAGE = 20;
+
+  const {
+    canvas,
+    saveState,
+    bezierEditModeRef,
+    editingBezierPath,
+    setEditingBezierPath,
+    exitBezierEditMode,
+    isBezierEditMode,
+    curvedLineEditModeRef,
+    editingCurvedLine,
+    exitCurvedLineEditMode,
+    isCurvedLineEditMode,
+    isMembraneEditMode,
+    membraneEditModeRef,
+    editingMembrane,
+    setEditingMembrane,
+    exitMembraneEditMode,
+    membraneEditTab,
+    setMembraneEditTab,
+  } = useCanvas();
+
+  // Fetch icons for adding to membrane
+  const { data: iconPageData, isLoading: isLoadingIcons } = useQuery({
+    queryKey: ['membrane-edit-icons', iconSearchQuery, membraneOnlyFilter, iconPage],
+    queryFn: async () => {
+      // Build count query
+      let countQuery = supabase
+        .from('icons')
+        .select('id', { count: 'exact', head: true });
+
+      // Build data query
+      let dataQuery = supabase
+        .from('icons')
+        .select('id, name, thumbnail, svg_content, category');
+
+      // Apply filters to both queries
+      if (membraneOnlyFilter) {
+        countQuery = countQuery.eq('is_membrane_icon', true);
+        dataQuery = dataQuery.eq('is_membrane_icon', true);
+      }
+
+      if (iconSearchQuery.trim()) {
+        countQuery = countQuery.ilike('name', `%${iconSearchQuery.trim()}%`);
+        dataQuery = dataQuery.ilike('name', `%${iconSearchQuery.trim()}%`);
+      }
+
+      // Get total count (only on first page)
+      if (iconPage === 0) {
+        const { count } = await countQuery;
+        setTotalIconCount(count || 0);
+      }
+
+      // Get paginated data
+      const offset = iconPage * ICONS_PER_PAGE;
+      const { data, error } = await dataQuery
+        .order('name')
+        .range(offset, offset + ICONS_PER_PAGE - 1);
+
+      if (error) throw error;
+      return data || [];
+    },
+  });
+
+  // Handle new page data - replace icons for true pagination
+  React.useEffect(() => {
+    if (iconPageData !== undefined) {
+      setLoadedIcons(iconPageData || []);
+    }
+  }, [iconPageData, iconPage]);
+
+  // Reset page and count when filters change
+  React.useEffect(() => {
+    setIconPage(0);
+    setTotalIconCount(0);
+  }, [iconSearchQuery, membraneOnlyFilter]);
+
+  // Pagination helpers
+  const getTotalPages = () => Math.ceil(totalIconCount / ICONS_PER_PAGE);
+  const hasNextPage = () => iconPage < getTotalPages() - 1;
+  const hasPreviousPage = () => iconPage > 0;
+  const goToNextPage = () => { if (hasNextPage()) setIconPage(prev => prev + 1); };
+  const goToPreviousPage = () => { if (hasPreviousPage()) setIconPage(prev => prev - 1); };
+
+  // Render pagination controls
+  const renderPaginationControls = () => {
+    const totalPages = getTotalPages();
+    if (totalPages <= 1 || totalIconCount === 0) return null;
+
+    return (
+      <div className="flex items-center justify-center gap-2 px-2 pb-2 pt-1">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={goToPreviousPage}
+          disabled={!hasPreviousPage() || isLoadingIcons}
+          className="h-7 w-7 p-0"
+          title="Previous page"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+
+        <span className="text-xs text-foreground font-medium px-2 min-w-[65px] text-center">
+          {iconPage + 1} / {totalPages}
+        </span>
+
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={goToNextPage}
+          disabled={!hasNextPage() || isLoadingIcons}
+          className="h-7 w-7 p-0"
+          title="Next page"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+      </div>
+    );
+  };
+
+  // Handler to add an icon to the membrane
+  const handleAddIcon = React.useCallback(async (iconData: any) => {
+    if (!canvas || !membraneEditModeRef.current) return;
+
+    const membraneEditMode = membraneEditModeRef.current;
+    const membrane = (membraneEditMode as any).membrane;
+    if (!membrane) return;
+
+    try {
+      // Load SVG
+      let svgContent = iconData.svg_content;
+      if (!svgContent || typeof svgContent !== 'string') {
+        toast.error('Icon has no valid SVG content');
+        return;
+      }
+
+      // Preprocess SVG content
+      // Remove XML declaration if present
+      svgContent = svgContent.replace(/<\?xml[^?]*\?>\s*/gi, '');
+
+      // Remove namespaces (ns0:, ns1:, etc.)
+      svgContent = svgContent.replace(/ns\d+:/gi, '');
+      svgContent = svgContent.replace(/xmlns:ns\d+="[^"]*"/gi, '');
+
+      // Trim whitespace
+      svgContent = svgContent.trim();
+
+      // Validate SVG content
+      if (!svgContent.includes('<svg')) {
+        console.error('Invalid SVG content after preprocessing');
+        toast.error('Invalid SVG format');
+        return;
+      }
+
+      const loadResult = await loadSVGFromString(svgContent);
+      if (!loadResult || !loadResult.objects || loadResult.objects.length === 0) {
+        console.error('Failed to parse SVG:', iconData.name);
+        toast.error(`Failed to load ${iconData.name}`);
+        return;
+      }
+
+      const { objects } = loadResult;
+
+      // Create fabric group from loaded SVG objects
+      const iconGroup = new FabricGroup(objects, {
+        selectable: true,
+        evented: true,
+      });
+
+      // Get the membrane's icon size setting (default to 40)
+      const membraneOptions = (membrane as any).membraneOptions || { iconSize: 40 };
+      const targetSize = membraneOptions.iconSize || 40;
+
+      // Scale icon to target size
+      // Get current dimensions
+      const currentWidth = iconGroup.width || 1;
+      const currentHeight = iconGroup.height || 1;
+      const currentSize = Math.max(currentWidth, currentHeight);
+
+      // Calculate scale to fit target size
+      const scale = targetSize / currentSize;
+
+      // Get membrane center (not viewport center)
+      const membraneBounds = membrane.getBoundingRect();
+      const centerX = membraneBounds.left + membraneBounds.width / 2;
+      const centerY = membraneBounds.top + membraneBounds.height / 2;
+
+      // Apply scale and position
+      iconGroup.set({
+        left: centerX,
+        top: centerY,
+        scaleX: scale,
+        scaleY: scale,
+        originX: 'center',
+        originY: 'center',
+      });
+
+      // Mark icon with metadata for icon-by-reference saving
+      (iconGroup as any).iconId = iconData.id;
+      (iconGroup as any).isLibraryIcon = true;
+      (iconGroup as any).isMembraneIcon = true;
+
+      // Override toObject to include icon metadata in serialization
+      const originalToObject = iconGroup.toObject.bind(iconGroup);
+      (iconGroup as any).toObject = function(propertiesToInclude?: string[]) {
+        return originalToObject([
+          ...(propertiesToInclude || []),
+          'iconId',
+          'isLibraryIcon',
+          'isMembraneIcon',
+        ]);
+      };
+
+      iconGroup.setCoords();
+
+      // Add to canvas (since we're in icon mode, icons are ungrouped)
+      canvas.add(iconGroup);
+      canvas.setActiveObject(iconGroup);
+      canvas.renderAll();
+
+      // Calculate local coordinates for regrouping
+      // The icon is currently in world coordinates, we need to calculate what its
+      // local coordinates would be in the membrane group
+      if (groupMatrixRef.current) {
+        const inverseMatrix = util.invertTransform(groupMatrixRef.current);
+        const iconWorldPos = new FabricPoint(centerX, centerY);
+        const iconLocalPos = util.transformPoint(iconWorldPos, inverseMatrix);
+
+        // Calculate local angle and scale relative to stored group transformation
+        const storedAngle = membraneAngleRef.current;
+        const storedScale = membraneScaleRef.current;
+        const localAngle = 0 - storedAngle; // New icon has 0 angle in world coords
+        const localScaleX = scale / storedScale.x;
+        const localScaleY = scale / storedScale.y;
+
+        // Add to iconOriginalData with its local coordinates
+        setIconOriginalData(prev => [...prev, {
+          icon: iconGroup,
+          originalLeft: iconLocalPos.x,
+          originalTop: iconLocalPos.y,
+          originalAngle: localAngle,
+          originalScaleX: localScaleX,
+          originalScaleY: localScaleY,
+        }]);
+      }
+
+      // Add to newAddedIcons list - will be processed when "Done Editing" is clicked
+      setNewAddedIcons(prev => [...prev, iconGroup]);
+
+      toast.success(`Added ${iconData.name}`);
+    } catch (error) {
+      console.error('Error adding icon:', error);
+      toast.error(`Failed to add ${iconData.name}`);
+    }
+  }, [canvas, membraneEditModeRef]);
+
+  // Listen for canvas events during membrane edit mode to update UI
+  React.useEffect(() => {
+    if (!canvas || !isMembraneEditMode) {
+      // Reset tab when exiting membrane edit mode
+      setMembraneEditTab('line');
+      setNewAddedIcons([]);
+      setIsExiting(false);
+      return;
+    }
+
+    // Reset to line tab when entering membrane edit mode
+    setMembraneEditTab('line');
+    setNewAddedIcons([]);
+
+    const handleCanvasChange = () => {
+      forceUpdate();
+    };
+
+    // Listen to various canvas events that might indicate state changes
+    canvas.on('object:modified', handleCanvasChange);
+    canvas.on('object:added', handleCanvasChange); // New anchor points being added
+    canvas.on('object:removed', handleCanvasChange); // Anchor points being deleted
+    canvas.on('selection:created', handleCanvasChange);
+    canvas.on('selection:updated', handleCanvasChange);
+    canvas.on('selection:cleared', handleCanvasChange);
+
+    return () => {
+      canvas.off('object:modified', handleCanvasChange);
+      canvas.off('object:added', handleCanvasChange);
+      canvas.off('object:removed', handleCanvasChange);
+      canvas.off('selection:created', handleCanvasChange);
+      canvas.off('selection:updated', handleCanvasChange);
+      canvas.off('selection:cleared', handleCanvasChange);
+    };
+  }, [canvas, isMembraneEditMode, forceUpdate]);
+
+  // Handle switching between line and icon editing modes for membrane
+  // SIMPLIFIED: Icon tab keeps membrane rasterized, only tracks new added icons
+  React.useEffect(() => {
+    if (!canvas || !isMembraneEditMode || !membraneEditModeRef.current) {
+      return;
+    }
+
+    const membraneEditMode = membraneEditModeRef.current;
+    const membrane = (membraneEditMode as any).membrane;
+    if (!membrane) {
+      return;
+    }
+
+    if (membraneEditTab === 'icon') {
+      // Icon tab: Keep membrane visible as-is (rasterized)
+      // No need to extract icons - they stay in the rasterized image
+      // User can only add NEW icons which will be tracked in newAddedIcons state
+      // Nothing to do here - just display the membrane and icon library
+    } else {
+      // Switch back to LINE editing mode - regroup the icons (if we were in icon mode)
+
+      // If we don't have ungrouped icons, we're already in line mode
+      // Clean up any stale state and return
+      if (!hasUngrouped) {
+        // Ensure clean state when in line mode
+        if (iconOriginalData.length > 0 || groupMatrixRef.current) {
+          setIconOriginalData([]);
+          setUngroupedIcons([]);
+          groupMatrixRef.current = null;
+          isRegroupingRef.current = false;
+        }
+        return;
+      }
+
+      // Must have stored data to regroup
+      if (iconOriginalData.length === 0 || !groupMatrixRef.current) {
+        console.error('[Line Mode] Cannot regroup - missing stored data');
+        setHasUngrouped(false);
+        setUngroupedIcons([]);
+        setIconOriginalData([]);
+        groupMatrixRef.current = null;
+        return;
+      }
+
+      // Prevent duplicate regrouping attempts
+      if (isRegroupingRef.current) {
+        return;
+      }
+      isRegroupingRef.current = true;
+
+      // Clear any selections
+      canvas.discardActiveObject();
+
+      // Use the stored matrix from when we ungrouped (not the empty group's matrix)
+      const storedMatrix = groupMatrixRef.current;
+      const inverseMatrix = util.invertTransform(storedMatrix as any);
+      const storedAngle = membraneAngleRef.current;
+      const storedScale = membraneScaleRef.current;
+
+      // Batch canvas operations to prevent multiple renders
+      const originalRenderOnAddRemove = canvas.renderOnAddRemove;
+      canvas.renderOnAddRemove = false;
+
+      try {
+        // Remove icons from canvas and calculate new local coordinates
+        iconOriginalData.forEach(({ icon }) => {
+          // Get icon's current world position BEFORE removing from canvas
+          const iconWorldPos = new FabricPoint(icon.left || 0, icon.top || 0);
+
+          // Remove from canvas
+          canvas.remove(icon);
+
+          // Transform to group-local coordinates using the STORED matrix
+          const iconLocalPos = util.transformPoint(iconWorldPos, inverseMatrix);
+
+          // Calculate local angle and scale
+          const localAngle = (icon.angle || 0) - storedAngle;
+          const localScaleX = (icon.scaleX || 1) / storedScale.x;
+          const localScaleY = (icon.scaleY || 1) / storedScale.y;
+
+          // Set to group-local coordinates
+          icon.set({
+            left: iconLocalPos.x,
+            top: iconLocalPos.y,
+            angle: localAngle,
+            scaleX: localScaleX,
+            scaleY: localScaleY,
+            originX: 'center',
+            originY: 'center',
+            selectable: false,
+            evented: false,
+          });
+
+          icon.setCoords();
+
+          // Add back to the membrane group
+          membrane.add(icon);
+        });
+      } finally {
+        // Restore original render setting
+        canvas.renderOnAddRemove = originalRenderOnAddRemove;
+      }
+
+      // After adding all icons, the group recalculates its bounds/center.
+      // We need to restore the group's position to match the stored matrix.
+      // The stored matrix [1, 0, 0, 1, tx, ty] means center is at (tx, ty) for no rotation/scale.
+      const storedCenterX = storedMatrix[4];
+      const storedCenterY = storedMatrix[5];
+
+      // Get the group's current center (after adding icons)
+      const currentCenter = membrane.getCenterPoint();
+
+      // Calculate the offset needed to restore the correct center
+      const offsetX = storedCenterX - currentCenter.x;
+      const offsetY = storedCenterY - currentCenter.y;
+
+      // Move the group to restore its original center position
+      membrane.set({
+        left: (membrane.left || 0) + offsetX,
+        top: (membrane.top || 0) + offsetY,
+      });
+
+      // Clear the ungrouped icons state
+      setUngroupedIcons([]);
+      setHasUngrouped(false);
+      setIconOriginalData([]);
+      groupMatrixRef.current = null;
+      isRegroupingRef.current = false;
+
+      // Show the membrane group again
+      membrane.set({ visible: true });
+      membrane.setCoords();
+
+      // Reactivate the bezier edit mode to restore all controls
+      if (bezierEditMode && virtualPath) {
+        // Re-add the virtual path
+        canvas.add(virtualPath);
+        canvas.bringObjectToFront(virtualPath);
+
+        // Reactivate bezier edit mode
+        bezierEditMode.activate(virtualPath);
+      }
+
+      canvas.renderAll();
+    }
+
+    // No cleanup needed here - the main effect body handles regrouping when tab changes
+  }, [canvas, isMembraneEditMode, membraneEditModeRef, membraneEditTab, hasUngrouped]);
+
+  // Handle bezier edit mode
+  if (isBezierEditMode && bezierEditModeRef.current && editingBezierPath) {
+    const editMode = bezierEditModeRef.current;
+    const selectedPath = editingBezierPath as BezierPath;
+
+    if (!editMode.isActive()) {
+      return null;
+    }
+
+    const selectedAnchorId = editMode.getSelectedAnchorId();
+    const bezierPoints = (selectedPath as any).bezierPoints || [];
+    const selectedPoint = bezierPoints.find(
+      (p: any) => p.id === selectedAnchorId,
+    );
+
+    const handleToggleType = () => {
+      if (selectedAnchorId) {
+        editMode.togglePointType(selectedAnchorId);
+        // Force React to re-render by updating the state
+        setEditingBezierPath({ ...editingBezierPath });
+      }
+    };
+
+    const handleDeletePoint = () => {
+      if (selectedAnchorId) {
+        editMode.deleteAnchorPoint(selectedAnchorId);
+      }
+    };
+
+    return (
+      <ScrollArea className="h-full">
+        <div className="p-4 space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 pb-2 border-b">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-sm font-semibold">Edit Mode Active</span>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                • Click path to add point
+              </p>
+              <p className="text-xs text-muted-foreground">
+                • Click anchor to select
+              </p>
+              <p className="text-xs text-muted-foreground">
+                • Drag handles to reshape
+              </p>
+            </div>
+
+            {selectedPoint && (
+              <div className="space-y-2 pt-2 border-t">
+                <p className="text-xs font-semibold">Selected Anchor</p>
+
+                <div className="flex items-center justify-between gap-3 p-2 rounded-md bg-muted/50">
+                  <div className="flex flex-col items-center gap-1">
+                    <SquareIcon
+                      size={16}
+                      weight={
+                        selectedPoint.type === "corner" ? "fill" : "regular"
+                      }
+                    />
+                    <span className="text-xs font-medium">Corner</span>
+                  </div>
+                  <Switch
+                    checked={selectedPoint.type === "smooth"}
+                    onCheckedChange={handleToggleType}
+                    className="data-[state=unchecked]:bg-border"
+                  />
+                  <div className="flex flex-col items-center gap-1">
+                    <CircleIcon
+                      size={16}
+                      weight={
+                        selectedPoint.type === "smooth" ? "fill" : "regular"
+                      }
+                    />
+                    <span className="text-xs font-medium">Smooth</span>
+                  </div>
+                </div>
+
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  onClick={handleDeletePoint}
+                  disabled={bezierPoints.length <= 2}
+                >
+                  <TrashIcon
+                    size={14}
+                    className="mr-1"
+                  />
+                  Delete Point
+                </Button>
+              </div>
+            )}
+
+            {/* Close Path Button - only show if path is open and has 3+ points */}
+            {editingBezierPath && !(editingBezierPath as any).isClosed && bezierPoints.length >= 3 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => {
+                  if (editMode && editingBezierPath && canvas) {
+                    // Mark as closed
+                    (editingBezierPath as any).isClosed = true;
+
+                    // Recalculate control points for closed path
+                    const bezierPoints = (editingBezierPath as any).bezierPoints;
+                    const tension = 0.5;
+
+                    // For closed paths, all points are interior points in a loop
+                    for (let i = 0; i < bezierPoints.length; i++) {
+                      const prev = bezierPoints[(i - 1 + bezierPoints.length) % bezierPoints.length];
+                      const curr = bezierPoints[i];
+                      const next = bezierPoints[(i + 1) % bezierPoints.length];
+
+                      const tx = (next.x - prev.x) * tension;
+                      const ty = (next.y - prev.y) * tension;
+
+                      curr.controlPoint1 = {
+                        x: curr.x - tx / 2,
+                        y: curr.y - ty / 2,
+                      };
+                      curr.controlPoint2 = {
+                        x: curr.x + tx / 2,
+                        y: curr.y + ty / 2,
+                      };
+                    }
+
+                    // Rebuild path data
+                    let pathData = `M ${bezierPoints[0].x} ${bezierPoints[0].y}`;
+
+                    for (let i = 0; i < bezierPoints.length - 1; i++) {
+                      const curr = bezierPoints[i];
+                      const next = bezierPoints[i + 1];
+
+                      if (curr.controlPoint2 && next.controlPoint1) {
+                        pathData += ` C ${curr.controlPoint2.x} ${curr.controlPoint2.y}, ${next.controlPoint1.x} ${next.controlPoint1.y}, ${next.x} ${next.y}`;
+                      } else {
+                        pathData += ` L ${next.x} ${next.y}`;
+                      }
+                    }
+
+                    // Add closing bezier curve
+                    const last = bezierPoints[bezierPoints.length - 1];
+                    const first = bezierPoints[0];
+
+                    if (last.controlPoint2 && first.controlPoint1) {
+                      pathData += ` C ${last.controlPoint2.x} ${last.controlPoint2.y}, ${first.controlPoint1.x} ${first.controlPoint1.y}, ${first.x} ${first.y}`;
+                    }
+
+                    // Update the path
+                    (editingBezierPath as any).set({ path: pathData });
+                    (editingBezierPath as any).setCoords();
+
+                    // Update edit mode to show the new control points
+                    editMode.deactivate();
+                    editMode.activate(editingBezierPath as any);
+
+                    canvas.renderAll();
+                    saveState();
+                    setEditingBezierPath({ ...editingBezierPath }); // Force re-render
+                    toast.success("Path closed with smooth curve");
+                  }
+                }}
+              >
+                <CheckCircleIcon size={16} className="mr-1" />
+                Close Path
+              </Button>
+            )}
+
+            <Button
+              variant="default"
+              size="sm"
+              className="w-full"
+              onClick={exitBezierEditMode}
+            >
+              <CheckCircleIcon
+                size={16}
+                className="mr-1"
+              />
+              Done Editing
+            </Button>
+          </div>
+        </div>
+      </ScrollArea>
+    );
+  }
+
+  // Handle curved line edit mode
+  if (
+    isCurvedLineEditMode &&
+    curvedLineEditModeRef.current &&
+    editingCurvedLine
+  ) {
+    const editMode = curvedLineEditModeRef.current;
+
+    if (!editMode.isActive()) {
+      return null;
+    }
+
+    return (
+      <ScrollArea className="h-full">
+        <div className="p-4 space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 pb-2 border-b">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-sm font-semibold">Edit Mode Active</span>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                • Drag the green control point to adjust the curve
+              </p>
+              <p className="text-xs text-muted-foreground">
+                • Dashed lines show the curve control
+              </p>
+            </div>
+
+            <Button
+              variant="default"
+              size="sm"
+              className="w-full"
+              onClick={exitCurvedLineEditMode}
+            >
+              <CheckCircleIcon
+                size={16}
+                className="mr-1"
+              />
+              Done Editing
+            </Button>
+          </div>
+        </div>
+      </ScrollArea>
+    );
+  }
+
+  // Handle membrane edit mode - use tabs for line vs icon editing
+  if (isMembraneEditMode && membraneEditModeRef.current && editingMembrane) {
+    const membraneEditMode = membraneEditModeRef.current;
+
+    if (!membraneEditMode.isActive()) {
+      return null;
+    }
+
+    // Get the underlying BezierEditMode and virtual path
+    const bezierEditMode = (membraneEditMode as any).pathEditMode;
+    const virtualPath = (membraneEditMode as any).virtualPath;
+
+    if (!bezierEditMode || !virtualPath) {
+      return null;
+    }
+
+    const selectedAnchorId = bezierEditMode.getSelectedAnchorId();
+    const bezierPoints = (virtualPath as any).bezierPoints || [];
+    const selectedPoint = bezierPoints.find(
+      (p: any) => p.id === selectedAnchorId,
+    );
+
+    const handleToggleType = () => {
+      if (selectedAnchorId) {
+        bezierEditMode.togglePointType(selectedAnchorId);
+        setEditingMembrane({ ...editingMembrane });
+      }
+    };
+
+    const handleDeletePoint = () => {
+      if (selectedAnchorId) {
+        bezierEditMode.deleteAnchorPoint(selectedAnchorId);
+      }
+    };
+
+    const activeObject = canvas?.getActiveObject();
+    const selectedIcon = activeObject && ungroupedIcons.includes(activeObject) ? activeObject : null;
+    const selectedIconIndex = selectedIcon ? ungroupedIcons.indexOf(selectedIcon) : -1;
+
+    return (
+      <ScrollArea className="h-full">
+        <div className="p-4 space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 pb-2 border-b">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-sm font-semibold">Edit Mode Active</span>
+            </div>
+
+            {/* Membrane Edit Mode Tabs */}
+            <div className="flex gap-1 p-1 bg-slate-100 rounded-lg">
+              <button
+                className={`flex-1 h-8 text-xs rounded-md transition-all flex items-center justify-center gap-1 font-medium ${
+                  membraneEditTab === 'line'
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                onClick={() => setMembraneEditTab('line')}
+              >
+                <Minus className="h-3 w-3" />
+                Line
+              </button>
+              <button
+                className={`flex-1 h-8 text-xs rounded-md transition-all flex items-center justify-center gap-1 font-medium ${
+                  membraneEditTab === 'icon'
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                onClick={() => setMembraneEditTab('icon')}
+              >
+                <Image className="h-3 w-3" />
+                Icon
+              </button>
+            </div>
+
+            {membraneEditTab === 'line' && (
+              <div className="space-y-2 mt-3">
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    • Click path to add point
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    • Click anchor to select
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    • Drag handles to reshape
+                  </p>
+                </div>
+
+                {selectedPoint && (
+                  <div className="space-y-2 pt-2 border-t">
+                    <p className="text-xs font-semibold">Selected Anchor</p>
+
+                    <div className="flex items-center justify-between gap-3 p-2 rounded-md bg-muted/50">
+                      <div className="flex flex-col items-center gap-1">
+                        <SquareIcon
+                          size={16}
+                          weight={
+                            selectedPoint.type === "corner" ? "fill" : "regular"
+                          }
+                        />
+                        <span className="text-xs font-medium">Corner</span>
+                      </div>
+                      <Switch
+                        checked={selectedPoint.type === "smooth"}
+                        onCheckedChange={handleToggleType}
+                        className="data-[state=unchecked]:bg-border"
+                      />
+                      <div className="flex flex-col items-center gap-1">
+                        <CircleIcon
+                          size={16}
+                          weight={
+                            selectedPoint.type === "smooth" ? "fill" : "regular"
+                          }
+                        />
+                        <span className="text-xs font-medium">Smooth</span>
+                      </div>
+                    </div>
+
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      className="w-full"
+                      onClick={handleDeletePoint}
+                      disabled={bezierPoints.length <= 2}
+                    >
+                      <TrashIcon
+                        size={14}
+                        className="mr-1"
+                      />
+                      Delete Point
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {membraneEditTab === 'icon' && (
+              <div className="space-y-3 mt-3">
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    Click an icon below to add it to the membrane
+                  </p>
+                </div>
+
+                {/* Search Bar */}
+                <div className="flex items-center gap-2">
+                  <Search className="h-4 w-4 text-muted-foreground" />
+                  <Input
+                    type="text"
+                    placeholder="Search icons..."
+                    value={iconSearchQuery}
+                    onChange={(e) => setIconSearchQuery(e.target.value)}
+                    className="h-8 text-xs"
+                  />
+                </div>
+
+                {/* Category Badges */}
+                <div className="flex flex-wrap gap-2">
+                  {['Phospholipid', 'pump', 'receptor', 'channel'].map((category) => {
+                    const isActive = iconSearchQuery === category;
+                    return (
+                      <Badge
+                        key={category}
+                        variant={isActive ? "default" : "outline"}
+                        className="cursor-pointer text-xs"
+                        onClick={() => setIconSearchQuery(isActive ? "" : category)}
+                      >
+                        {category}
+                      </Badge>
+                    );
+                  })}
+                </div>
+
+                {/* Membrane Only Checkbox */}
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={membraneOnlyFilter}
+                    onCheckedChange={(checked) => setMembraneOnlyFilter(checked as boolean)}
+                    id="membrane-only-edit"
+                  />
+                  <Label htmlFor="membrane-only-edit" className="text-xs cursor-pointer">
+                    membrane only
+                  </Label>
+                </div>
+
+                {/* Icon Grid */}
+                <ScrollArea className="h-48 border rounded-md">
+                  <div className="grid grid-cols-4 gap-2 p-2">
+                    {isLoadingIcons && iconPage === 0 ? (
+                      // Loading state on first page
+                      Array.from({ length: 8 }).map((_, i) => (
+                        <div key={i} className="aspect-square border rounded bg-muted animate-pulse" />
+                      ))
+                    ) : loadedIcons.length === 0 ? (
+                      // Empty state
+                      <div className="col-span-4 p-4 text-center text-xs text-muted-foreground">
+                        No icons found. Try adjusting your filters.
+                      </div>
+                    ) : (
+                      // Icon grid
+                      loadedIcons.map((icon) => (
+                        <div
+                          key={icon.id}
+                          className="aspect-square border rounded p-2 flex items-center justify-center cursor-pointer transition-all border-border hover:border-primary/50 hover:bg-primary/5"
+                          onClick={() => handleAddIcon(icon)}
+                          title={icon.name}
+                        >
+                          {icon.thumbnail ? (
+                            icon.thumbnail.startsWith('data:image/png') ? (
+                              <img
+                                src={icon.thumbnail}
+                                alt={icon.name}
+                                className="w-full h-full object-contain"
+                              />
+                            ) : (
+                              <div
+                                dangerouslySetInnerHTML={{ __html: sanitizeSVG(icon.thumbnail) }}
+                                className="w-full h-full [&>svg]:w-full [&>svg]:object-contain"
+                              />
+                            )
+                          ) : (
+                            <div className="text-xs text-muted-foreground text-center">No preview</div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {renderPaginationControls()}
+                </ScrollArea>
+              </div>
+            )}
+
+            <Button
+              variant="default"
+              size="sm"
+              className="w-full"
+              disabled={isExiting}
+              onClick={async () => {
+                setIsExiting(true);
+                try {
+                  // If we're in icon mode, switch back to line mode first to regroup with user's changes
+                  if (membraneEditTab === 'icon') {
+                    setMembraneEditTab('line');
+                    // Wait a tick for the regrouping to complete
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    // Allow React to process the state update
+                    await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)));
+                    // Set flag to skip regeneration since we just regrouped with user's icon changes
+                    if (membraneEditModeRef.current) {
+                      (membraneEditModeRef.current as any).skipRegenerationOnExit = true;
+                    }
+                    exitMembraneEditMode();
+                  } else {
+                    exitMembraneEditMode();
+                  }
+                } finally {
+                  setIsExiting(false);
+                }
+              }}
+            >
+              {isExiting ? (
+                <>
+                  <Loader2
+                    size={16}
+                    className="mr-1 animate-spin"
+                  />
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <CheckCircleIcon
+                    size={16}
+                    className="mr-1"
+                  />
+                  Done Editing
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      </ScrollArea>
+    );
+  }
+
+  return null;
+};

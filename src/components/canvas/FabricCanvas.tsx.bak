@@ -1,0 +1,5069 @@
+import { useEffect, useRef, useState } from "react";
+import { Canvas, FabricImage, Rect, Circle, Line, Textbox, Polygon, Ellipse, loadSVGFromString, util, Group, Path, PencilBrush, Control, FabricObject, Gradient, Pattern } from "fabric";
+import { EraserBrush } from "@erase2d/fabric";
+import { toast } from "sonner";
+import { useCanvas } from "@/contexts/CanvasContext";
+import { useGridAndRulerStore } from "@/stores/gridAndRulerStore";
+import { CanvasEditorTestIds } from "@/lib/test-ids";
+import { loadAllFonts, getCanvasFontFamily, getBaseFontName, debugTextObject, fixInvisibleText, normalizeCanvasTextFonts, normalizeEditingTextFont } from "@/lib/fontLoader";
+import { createConnector } from "@/lib/connectorSystem";
+import { createSVGArrowMarker } from "@/lib/advancedLineSystem";
+import { ArrowMarkerType, RoutingStyle } from "@/types/connector";
+import { EnhancedBezierTool } from "@/lib/enhancedBezierTool";
+import { CustomPolygonTool } from "@/lib/customPolygonTool";
+import { setupIntersectionRendering } from "@/lib/lineIntersectionCanvasRenderer";
+import { StraightLineTool } from "@/lib/straightLineTool";
+import { OrthogonalLineTool } from "@/lib/orthogonalLineTool";
+import { CurvedLineTool } from "@/lib/curvedLineTool";
+import { MembraneBrushTool } from "@/lib/membraneBrushTool";
+import { MembranePathTool } from "@/lib/membranePathTool";
+import { ChartTool, isChart } from "@/lib/chartTool";
+import { BezierEditMode } from "@/lib/bezierEditMode";
+import { CurvedLineEditMode } from "@/lib/curvedLineEditMode";
+import { calculateArcPath } from "@/lib/advancedLineSystem";
+import { ConnectorVisualFeedback } from "@/lib/connectorVisualFeedback";
+import { loadImageWithCORS } from "@/lib/utils";
+import { ObjectCullingManager, createThrottledCuller } from "@/lib/objectCulling";
+import { calculateObjectComplexity, applyComplexityOptimizations, shouldSimplifyControls } from "@/lib/objectComplexity";
+import { isTextBox, handleTextBoxResize, getTextBoxTextElement } from "@/lib/textBoxTool";
+import { createNumberedCallout, getNextCalloutNumber, registerCallout, renumberCallouts, createOrUpdateLegend, isCallout } from "@/lib/numberedCalloutTool";
+import { LeaderLineTool } from "@/lib/leaderLineTool";
+import { BracketTool } from "@/lib/bracketTool";
+import { useMembraneSettings } from "@/hooks/useMembraneSettings";
+import { supabase } from "@/integrations/supabase/client";
+
+// Default shape styling constants
+const DEFAULT_SHAPE_FILL = 'rgba(134, 239, 172, 0.5)';  // Light green at 50% opacity
+const DEFAULT_SHAPE_STROKE = '#9ca3af';                   // Light grey (gray-400)
+
+// Sanitize SVG namespace issues before parsing with Fabric.js
+const sanitizeSVGNamespaces = (svgContent: string): string => {
+  let sanitized = svgContent
+    // Replace <ns0:svg> and other namespace prefixes with <svg>
+    .replace(/<ns\d+:svg/g, '<svg')
+    .replace(/<\/ns\d+:svg>/g, '</svg>')
+    // Replace xmlns:ns0="..." with xmlns="..."
+    .replace(/xmlns:ns\d+=/g, 'xmlns=')
+    // Replace <ns0:element> with <element> for any SVG element
+    .replace(/<(\/?)ns\d+:(\w+)/g, '<$1$2')
+    // Remove any remaining ns0: references in attributes
+    .replace(/ns\d+:/g, '');
+  
+  // Ensure proper xmlns attribute exists
+  if (!sanitized.includes('xmlns="http://www.w3.org/2000/svg"')) {
+    sanitized = sanitized.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  
+  return sanitized;
+};
+
+interface FabricCanvasProps {
+  activeTool: string;
+  onShapeCreated?: () => void;
+  onToolChange?: (tool: string) => void;
+}
+
+export const FabricCanvas = ({ activeTool, onShapeCreated, onToolChange }: FabricCanvasProps) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const { settings: membraneSettings } = useMembraneSettings();
+  const defaultMembraneIconSVGRef = useRef<string | null>(null);
+
+  const [penToolState, setPenToolState] = useState<{
+    isDrawing: boolean;
+    points: Array<{ x: number; y: number }>;
+    tempMarkers: Circle[];
+    tempLines: Line[];
+  }>({
+    isDrawing: false,
+    points: [],
+    tempMarkers: [],
+    tempLines: [],
+  });
+  
+  const [connectorState, setConnectorState] = useState<{
+    isDrawing: boolean;
+    startX: number | null;
+    startY: number | null;
+  }>({
+    isDrawing: false,
+    startX: null,
+    startY: null,
+  });
+
+
+  const [isDuplicating, setIsDuplicating] = useState(false);
+  const clonedObjectRef = useRef<FabricObject | null>(null);
+  const originalOpacityMapRef = useRef<Map<any, number>>(new Map());
+  const activeDragRef = useRef<{
+    isMultiObject: boolean;
+    startTime: number;
+  } | null>(null);
+
+  // Helper functions for main-thread SVG processing (fallback when Web Worker fails)
+  const calculateSVGComplexityMainThread = (svgContent: string): number => {
+    let score = 0;
+    score += (svgContent.match(/<path/g) || []).length * 5;
+    score += (svgContent.match(/<polygon/g) || []).length * 3;
+    score += (svgContent.match(/<circle/g) || []).length * 1;
+    score += (svgContent.match(/<rect/g) || []).length * 1;
+    score += (svgContent.match(/<text/g) || []).length * 2;
+    score += (svgContent.match(/transform=/g) || []).length * 2;
+    score += (svgContent.match(/filter=/g) || []).length * 10;
+    return score;
+  };
+
+  const simplifySVGMainThread = (svgContent: string): string => {
+    // Find all IDs that are referenced by url() - these must be preserved
+    const referencedIds = new Set<string>();
+    const urlMatches = svgContent.matchAll(/url\(#([^)]+)\)/g);
+    for (const match of urlMatches) {
+      referencedIds.add(match[1]);
+    }
+
+    // Only remove IDs that are not referenced
+    let simplified = svgContent;
+    if (referencedIds.size > 0) {
+      // Keep IDs that are referenced (for gradients, filters, masks, etc.)
+      simplified = simplified.replace(/id="([^"]*)"/g, (match, id) => {
+        return referencedIds.has(id) ? match : '';
+      });
+    } else {
+      // No references found, safe to remove all IDs
+      simplified = simplified.replace(/id="[^"]*"/g, '');
+    }
+
+    return simplified
+      // Note: CSS classes are preserved - they often define fill colors
+      .replace(/style="[^"]*opacity:\s*0[^"]*"/g, 'style="display:none"')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const bezierToolRef = useRef<EnhancedBezierTool | null>(null);
+  const customPolygonToolRef = useRef<CustomPolygonTool | null>(null);
+  const straightLineToolRef = useRef<StraightLineTool | null>(null);
+  const orthogonalLineToolRef = useRef<OrthogonalLineTool | null>(null);
+  const curvedLineToolRef = useRef<CurvedLineTool | null>(null);
+  const membraneBrushToolRef = useRef<MembraneBrushTool | null>(null);
+  const membranePathToolRef = useRef<any>(null);
+  const connectorFeedbackRef = useRef<ConnectorVisualFeedback | null>(null);
+  const leaderLineToolRef = useRef<LeaderLineTool | null>(null);
+  const bracketToolRef = useRef<BracketTool | null>(null);
+
+  // Object culling manager for viewport-based performance optimization
+  const cullingManagerRef = useRef<ObjectCullingManager>(new ObjectCullingManager());
+  const throttledCullRef = useRef<(() => void) | null>(null);
+
+  // Grid and ruler state from zustand store
+  const gridEnabled = useGridAndRulerStore((state) => state.gridEnabled);
+  const rulersEnabled = useGridAndRulerStore((state) => state.rulersEnabled);
+  const gridPattern = useGridAndRulerStore((state) => state.gridPattern);
+  const gridSize = useGridAndRulerStore((state) => state.gridSize);
+
+  const {
+    canvas,
+    setCanvas,
+    setSelectedObject,
+    firstSelectedObjectRef,
+    backgroundColor,
+    backgroundGradient,
+    gradientStartColor,
+    gradientEndColor,
+    gradientType,
+    gradientAngle,
+    gradientCenterX,
+    gradientCenterY,
+    gradientRadius,
+    canvasDimensions,
+    canvasLoadVersion,
+    zoom,
+    textFont,
+    textAlign,
+    textUnderline,
+    textOverline,
+    textBold,
+    textItalic,
+    saveState,
+    beginHistoryTransaction,
+    commitHistoryTransaction,
+    isBezierEditMode,
+    setIsBezierEditMode,
+    bezierEditModeRef,
+    editingBezierPath,
+    setEditingBezierPath,
+    exitBezierEditMode,
+    isCurvedLineEditMode,
+    setIsCurvedLineEditMode,
+    curvedLineEditModeRef,
+    editingCurvedLine,
+    setEditingCurvedLine,
+    exitCurvedLineEditMode,
+    isImageEditMode,
+    exitImageEditMode,
+    isMembraneEditMode,
+    setIsMembraneEditMode,
+    membraneEditModeRef,
+    editingMembrane,
+    setEditingMembrane,
+    exitMembraneEditMode,
+    isReadOnly,
+  } = useCanvas();
+
+  // Keyboard handler for Escape key in edit mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isBezierEditMode) {
+        exitBezierEditMode();
+      }
+      if (e.key === 'Escape' && isCurvedLineEditMode) {
+        exitCurvedLineEditMode();
+      }
+      if (e.key === 'Escape' && isImageEditMode) {
+        exitImageEditMode();
+      }
+      if (e.key === 'Escape' && isMembraneEditMode) {
+        exitMembraneEditMode();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isBezierEditMode, exitBezierEditMode, isCurvedLineEditMode, exitCurvedLineEditMode, isImageEditMode, exitImageEditMode, isMembraneEditMode, exitMembraneEditMode]);
+
+  // Exit edit mode when activeTool changes (user selects a different tool)
+  useEffect(() => {
+    if (isBezierEditMode && activeTool !== 'select') {
+      exitBezierEditMode();
+    }
+    if (isCurvedLineEditMode && activeTool !== 'select') {
+      exitCurvedLineEditMode();
+    }
+    if (isImageEditMode && activeTool !== 'select') {
+      exitImageEditMode();
+    }
+  }, [activeTool, isBezierEditMode, exitBezierEditMode, isCurvedLineEditMode, exitCurvedLineEditMode, isImageEditMode, exitImageEditMode]);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+
+    // Track canvas reference and disposal state for proper cleanup
+    let fabricCanvas: Canvas | null = null;
+    let isDisposed = false;
+    
+    // Event handler references for cleanup
+    let handleAddIcon: ((event: CustomEvent) => Promise<void>) | null = null;
+    let handleAddAsset: ((event: CustomEvent) => Promise<void>) | null = null;
+
+    const initCanvas = async () => {
+      // Load fonts before initializing canvas
+      await loadAllFonts();
+      
+      // Check if component unmounted during async font loading
+      if (isDisposed) return;
+      
+      // Set global control styles on FabricObject prototype (BioRender-style blue theme)
+      FabricObject.prototype.cornerColor = '#3B82F6';        // Blue-500 corners
+      FabricObject.prototype.cornerStrokeColor = '#ffffff';
+      FabricObject.prototype.cornerStyle = 'rect';           // Use rect for grip-style rendering
+      FabricObject.prototype.cornerSize = 12;                // Slightly larger for grip handles
+      FabricObject.prototype.transparentCorners = false;
+      FabricObject.prototype.borderColor = '#3B82F6';        // Blue selection border
+      FabricObject.prototype.borderScaleFactor = 1.5;        // Thinner border
+      FabricObject.prototype.borderDashArray = [6, 4];       // Dashed border for better visibility
+      FabricObject.prototype.padding = 4;
+      (FabricObject.prototype as any).hasRotatingPoint = true;        // Enable rotation handle globally
+      (FabricObject.prototype as any).rotatingPointOffset = 45;       // Distance above object
+      (FabricObject.prototype as any).hasControls = true;             // Ensure controls are visible
+
+      // Custom arrow corner control renderer (diagonal resize arrows)
+      const renderArrowCorner = (direction: 'nwse' | 'nesw') => (
+        ctx: CanvasRenderingContext2D,
+        left: number,
+        top: number,
+        _styleOverride: any,
+        _fabricObject: any
+      ) => {
+        const size = 16;
+        
+        ctx.save();
+        ctx.translate(left, top);
+        
+        // Draw circular background with shadow
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+        ctx.shadowOffsetY = 1;
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'hsl(215 20% 75%)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Reset shadow for arrow
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+        
+        // Rotate based on direction (nwse = ↖↘, nesw = ↗↙)
+        ctx.rotate(direction === 'nwse' ? -Math.PI / 4 : Math.PI / 4);
+        
+        // Draw double-headed arrow
+        ctx.strokeStyle = 'hsl(215 15% 40%)';
+        ctx.lineWidth = 1.5;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        const arrowLength = 5;
+        const headSize = 2.5;
+        
+        // Arrow line
+        ctx.beginPath();
+        ctx.moveTo(-arrowLength, 0);
+        ctx.lineTo(arrowLength, 0);
+        ctx.stroke();
+        
+        // Left arrow head
+        ctx.beginPath();
+        ctx.moveTo(-arrowLength + headSize, -headSize);
+        ctx.lineTo(-arrowLength, 0);
+        ctx.lineTo(-arrowLength + headSize, headSize);
+        ctx.stroke();
+        
+        // Right arrow head
+        ctx.beginPath();
+        ctx.moveTo(arrowLength - headSize, -headSize);
+        ctx.lineTo(arrowLength, 0);
+        ctx.lineTo(arrowLength - headSize, headSize);
+        ctx.stroke();
+        
+        ctx.restore();
+      };
+
+      // Custom arrow edge control renderer (horizontal or vertical resize arrows)
+      const renderArrowEdge = (isHorizontal: boolean) => (
+        ctx: CanvasRenderingContext2D,
+        left: number,
+        top: number,
+        _styleOverride: any,
+        _fabricObject: any
+      ) => {
+        const width = isHorizontal ? 22 : 14;
+        const height = isHorizontal ? 14 : 22;
+        
+        ctx.save();
+        ctx.translate(left, top);
+        
+        // Draw pill-shaped background with shadow
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+        ctx.shadowOffsetY = 1;
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'hsl(215 20% 75%)';
+        ctx.lineWidth = 1;
+        
+        // Pill shape (rounded rectangle with large radius)
+        const radius = Math.min(width, height) / 2;
+        ctx.beginPath();
+        ctx.moveTo(-width/2 + radius, -height/2);
+        ctx.lineTo(width/2 - radius, -height/2);
+        ctx.quadraticCurveTo(width/2, -height/2, width/2, -height/2 + radius);
+        ctx.lineTo(width/2, height/2 - radius);
+        ctx.quadraticCurveTo(width/2, height/2, width/2 - radius, height/2);
+        ctx.lineTo(-width/2 + radius, height/2);
+        ctx.quadraticCurveTo(-width/2, height/2, -width/2, height/2 - radius);
+        ctx.lineTo(-width/2, -height/2 + radius);
+        ctx.quadraticCurveTo(-width/2, -height/2, -width/2 + radius, -height/2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        
+        // Reset shadow for arrow
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+        
+        // Rotate 90° for vertical edges
+        if (!isHorizontal) {
+          ctx.rotate(Math.PI / 2);
+        }
+        
+        // Draw double-headed arrow (↔ or ↕)
+        ctx.strokeStyle = 'hsl(215 15% 40%)';
+        ctx.lineWidth = 1.5;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        const arrowLength = 6;
+        const headSize = 2.5;
+        
+        // Arrow line
+        ctx.beginPath();
+        ctx.moveTo(-arrowLength, 0);
+        ctx.lineTo(arrowLength, 0);
+        ctx.stroke();
+        
+        // Left arrow head
+        ctx.beginPath();
+        ctx.moveTo(-arrowLength + headSize, -headSize);
+        ctx.lineTo(-arrowLength, 0);
+        ctx.lineTo(-arrowLength + headSize, headSize);
+        ctx.stroke();
+        
+        // Right arrow head
+        ctx.beginPath();
+        ctx.moveTo(arrowLength - headSize, -headSize);
+        ctx.lineTo(arrowLength, 0);
+        ctx.lineTo(arrowLength - headSize, headSize);
+        ctx.stroke();
+        
+        ctx.restore();
+      };
+
+      // Apply custom grip renderers to default controls (with safety check)
+      const defaultControls = FabricObject.prototype.controls;
+      
+      if (defaultControls) {
+        // Corner controls with diagonal arrows (tl/br = nwse, tr/bl = nesw)
+        if (defaultControls.tl) defaultControls.tl.render = renderArrowCorner('nwse');
+        if (defaultControls.br) defaultControls.br.render = renderArrowCorner('nwse');
+        if (defaultControls.tr) defaultControls.tr.render = renderArrowCorner('nesw');
+        if (defaultControls.bl) defaultControls.bl.render = renderArrowCorner('nesw');
+        
+        // Edge controls with directional arrows (horizontal: mt, mb; vertical: ml, mr)
+        if (defaultControls.mt) defaultControls.mt.render = renderArrowEdge(true);
+        if (defaultControls.mb) defaultControls.mb.render = renderArrowEdge(true);
+        if (defaultControls.ml) defaultControls.ml.render = renderArrowEdge(false);
+        if (defaultControls.mr) defaultControls.mr.render = renderArrowEdge(false);
+      }
+
+      fabricCanvas = new Canvas(canvasRef.current!, {
+        width: canvasDimensions.width,
+        height: canvasDimensions.height,
+        backgroundColor: backgroundColor,
+        controlsAboveOverlay: true,
+        centeredScaling: false,
+        centeredRotation: true,
+        selection: !isReadOnly, // Disable multi-select in read-only mode
+      });
+
+      // Configure read-only mode
+      if (isReadOnly) {
+        fabricCanvas.defaultCursor = 'default';
+        fabricCanvas.hoverCursor = 'default';
+        fabricCanvas.moveCursor = 'default';
+      }
+
+      // Expose canvas to window for e2e testing
+      if (typeof window !== 'undefined') {
+        (window as any).fabricCanvas = fabricCanvas;
+      }
+
+      // Setup bridge mode rendering for line intersections
+      setupIntersectionRendering(fabricCanvas);
+
+      // Check again after canvas creation
+      if (isDisposed) {
+        fabricCanvas.dispose();
+        return;
+      }
+
+    // Apply control styling to all objects added to canvas (grip-style handles)
+    fabricCanvas.on('object:added', (e) => {
+      if (e.target) {
+        const targetData = e.target as any;
+
+        // Skip grid and ruler objects - they should never have controls or be selectable
+        if (targetData.isGridLine || targetData.isRuler) {
+          return;
+        }
+
+        e.target.set({
+          cornerColor: '#3B82F6',
+          cornerStrokeColor: '#ffffff',
+          cornerStyle: 'rect',
+          cornerSize: 12,
+          transparentCorners: false,
+          borderColor: '#3B82F6',
+          borderScaleFactor: 1.5,
+          borderDashArray: [6, 4],
+          padding: 4,
+          hasControls: true,
+          hasRotatingPoint: true,
+        });
+
+        // Apply custom arrow renderers to this object's controls
+        if (e.target.controls) {
+          if (e.target.controls.tl) e.target.controls.tl.render = renderArrowCorner('nwse');
+          if (e.target.controls.br) e.target.controls.br.render = renderArrowCorner('nwse');
+          if (e.target.controls.tr) e.target.controls.tr.render = renderArrowCorner('nesw');
+          if (e.target.controls.bl) e.target.controls.bl.render = renderArrowCorner('nesw');
+          if (e.target.controls.mt) e.target.controls.mt.render = renderArrowEdge(true);
+          if (e.target.controls.mb) e.target.controls.mb.render = renderArrowEdge(true);
+          if (e.target.controls.ml) e.target.controls.ml.render = renderArrowEdge(false);
+          if (e.target.controls.mr) e.target.controls.mr.render = renderArrowEdge(false);
+        }
+        
+        // Normalize fonts for text objects using helper
+        if (e.target.type === "textbox" || e.target.type === "text") {
+          const textObj = e.target as any;
+          const base = getBaseFontName(textObj.fontFamily);
+          textObj.fontFamily = getCanvasFontFamily(base);
+        }
+        
+        // Also normalize text in groups using helper
+        if (e.target.type === "group" && (e.target as any).getObjects) {
+          (e.target as any).getObjects().forEach((child: any) => {
+            if (child.type === "textbox" || child.type === "text") {
+              const base = getBaseFontName(child.fontFamily);
+              child.fontFamily = getCanvasFontFamily(base);
+            }
+          });
+        }
+
+        // Snap to grid if enabled (for all user-created objects)
+        // Get current snap settings from canvas context via window
+        const currentSnapToGrid = (window as any).canvasContext?.snapToGrid || false;
+        const currentGridSize = (window as any).canvasContext?.gridSize || 20;
+        if (currentSnapToGrid && !(e.target as any).isGridLine && !(e.target as any).isRuler) {
+          const snappedLeft = Math.round((e.target.left || 0) / currentGridSize) * currentGridSize;
+          const snappedTop = Math.round((e.target.top || 0) / currentGridSize) * currentGridSize;
+          e.target.set({
+            left: snappedLeft,
+            top: snappedTop,
+          });
+          e.target.setCoords();
+        }
+      }
+    });
+
+    // Custom rotation control rendering (BioRender-style hand grab icon with hover glow)
+    const renderRotationControl = (
+      ctx: CanvasRenderingContext2D,
+      left: number,
+      top: number,
+      _styleOverride: any,
+      fabricObject: any
+    ) => {
+      const size = 28;
+      const isSelected = fabricObject.canvas?.getActiveObject() === fabricObject;
+      const isRotating = (fabricObject as any).isRotating;
+      
+      // Enhanced glow when rotating or selected
+      const glowIntensity = isRotating ? 16 : (isSelected ? 10 : 0);
+      const opacity = isSelected ? 1.0 : 0.85;
+      
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.translate(left, top);
+      
+      // Draw outer glow effect when selected (subtle blue glow)
+      if (glowIntensity > 0) {
+        ctx.shadowBlur = glowIntensity;
+        ctx.shadowColor = 'rgba(59, 130, 246, 0.6)'; // Blue glow
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        
+        // Draw glow circle (slightly larger)
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
+        ctx.beginPath();
+        ctx.arc(0, 0, size / 2 + 3, 0, Math.PI * 2);
+        ctx.closePath();
+        ctx.fill();
+      }
+      
+      // Reset and add subtle drop shadow for depth
+      ctx.shadowBlur = 6;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+      ctx.shadowOffsetY = 2;
+      ctx.shadowOffsetX = 0;
+      
+      // Draw circular background (BioRender blue theme)
+      ctx.fillStyle = isRotating ? '#2563EB' : '#3B82F6'; // Darker when rotating
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      
+      ctx.beginPath();
+      ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      
+      // Reset shadow for icon drawing
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+      
+      // Draw hand/grab icon (simplified hand with fingers)
+      ctx.strokeStyle = '#ffffff';
+      ctx.fillStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      
+      // Palm base (rounded rectangle)
+      ctx.beginPath();
+      ctx.moveTo(-4, 1);
+      ctx.lineTo(-4, 5);
+      ctx.quadraticCurveTo(-4, 6, -3, 6);
+      ctx.lineTo(3, 6);
+      ctx.quadraticCurveTo(4, 6, 4, 5);
+      ctx.lineTo(4, 1);
+      ctx.stroke();
+      
+      // Four fingers (vertical lines going up)
+      const fingerX = [-3, -1, 1, 3];
+      const fingerHeight = [-5, -6, -6, -5];
+      fingerX.forEach((x, i) => {
+        ctx.beginPath();
+        ctx.moveTo(x, 1);
+        ctx.lineTo(x, fingerHeight[i]);
+        ctx.stroke();
+      });
+      
+      // Thumb (angled to the left)
+      ctx.beginPath();
+      ctx.moveTo(-4, 3);
+      ctx.lineTo(-6, 1);
+      ctx.lineTo(-6, -1);
+      ctx.stroke();
+      
+      ctx.restore();
+      
+      // Draw rotation angle label if object is being rotated
+      if ((fabricObject as any).isRotating) {
+        ctx.save();
+        
+        // Position label above the rotation handle
+        const labelY = top - 25;
+        
+        // Normalize angle to 0-360 range
+        let normalizedAngle = Math.round(fabricObject.angle || 0) % 360;
+        if (normalizedAngle < 0) normalizedAngle += 360;
+        
+        const angleText = `${normalizedAngle}°`;
+        
+        // Measure text for background sizing
+        ctx.font = 'bold 14px system-ui, -apple-system, sans-serif';
+        const textMetrics = ctx.measureText(angleText);
+        const textWidth = textMetrics.width;
+        const textHeight = 14;
+        
+        const padding = 6;
+        const bgWidth = textWidth + padding * 2;
+        const bgHeight = textHeight + padding * 2;
+        
+        // Draw background with shadow
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+        ctx.shadowOffsetY = 2;
+        
+        ctx.fillStyle = '#1a1a1a';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        
+        const cornerRadius = 4;
+        const bgX = left - bgWidth / 2;
+        const bgY = labelY - bgHeight / 2;
+        
+        ctx.beginPath();
+        ctx.moveTo(bgX + cornerRadius, bgY);
+        ctx.lineTo(bgX + bgWidth - cornerRadius, bgY);
+        ctx.quadraticCurveTo(bgX + bgWidth, bgY, bgX + bgWidth, bgY + cornerRadius);
+        ctx.lineTo(bgX + bgWidth, bgY + bgHeight - cornerRadius);
+        ctx.quadraticCurveTo(bgX + bgWidth, bgY + bgHeight, bgX + bgWidth - cornerRadius, bgY + bgHeight);
+        ctx.lineTo(bgX + cornerRadius, bgY + bgHeight);
+        ctx.quadraticCurveTo(bgX, bgY + bgHeight, bgX, bgY + bgHeight - cornerRadius);
+        ctx.lineTo(bgX, bgY + cornerRadius);
+        ctx.quadraticCurveTo(bgX, bgY, bgX + cornerRadius, bgY);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        
+        // Reset shadow for text
+        ctx.shadowBlur = 0;
+        
+        // Draw angle text
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(angleText, left, labelY);
+        
+        ctx.restore();
+      }
+    };
+
+    // Rotation action handler
+    const rotationHandler = (eventData: MouseEvent, transform: any, x: number, y: number) => {
+      const target = transform.target;
+      const ex = x - target.getCenterPoint().x;
+      const ey = y - target.getCenterPoint().y;
+      const angle = Math.atan2(ey, ex) * (180 / Math.PI) - 90;
+
+      target.angle = angle;
+      (target as any).isRotating = true;
+      target.canvas?.requestRenderAll();
+      return true;
+    };
+
+    // Track when rotation ends to hide angle label
+    fabricCanvas.on('mouse:up', () => {
+      const activeObj = fabricCanvas?.getActiveObject();
+      if (activeObj && (activeObj as any).isRotating) {
+        (activeObj as any).isRotating = false;
+        fabricCanvas?.requestRenderAll();
+      }
+    });
+
+    // Create the Chemix-style rotation control
+    const mtrControl = new Control({
+      x: 0,
+      y: -0.5,
+      offsetY: -45,
+      cursorStyle: 'grab',
+      actionHandler: rotationHandler,
+      actionName: 'rotate',
+      render: renderRotationControl,
+      withConnection: true,
+      mouseDownHandler: () => {
+        fabricCanvas?.setCursor('grabbing');
+        return true;
+      },
+      mouseUpHandler: () => {
+        fabricCanvas?.setCursor('grab');
+        return true;
+      },
+    });
+
+    // Apply custom rotation control to FabricObject prototype safely
+    if (!FabricObject.prototype.controls) {
+      FabricObject.prototype.controls = {};
+    }
+    
+    FabricObject.prototype.controls.mtr = mtrControl;
+
+    // Ensure all major object types share the same Chemix-style rotation control
+    const rotationTargetClasses: any[] = [
+      Rect,
+      Circle,
+      Ellipse,
+      Polygon,
+      Line,
+      Path,
+      Group,
+      FabricImage,
+      Textbox,
+    ];
+
+    rotationTargetClasses.forEach((Ctor) => {
+      if (Ctor && Ctor.prototype) {
+        if (!Ctor.prototype.controls) {
+          Ctor.prototype.controls = {};
+        }
+        Ctor.prototype.controls.mtr = mtrControl;
+      }
+    });
+
+    fabricCanvas.isDrawingMode = false;
+    
+    // Initialize connector visual feedback
+    connectorFeedbackRef.current = new ConnectorVisualFeedback(fabricCanvas);
+    
+    // Initialize object culling manager
+    cullingManagerRef.current.setCanvas(fabricCanvas);
+    throttledCullRef.current = createThrottledCuller(cullingManagerRef.current, 100);
+    
+    // Apply culling on viewport changes (pan/zoom)
+    fabricCanvas.on('after:render', () => {
+      if (throttledCullRef.current) {
+        throttledCullRef.current();
+      }
+    });
+    
+    // Apply control styles to any existing objects on canvas (grip-style handles)
+    fabricCanvas.getObjects().forEach((obj) => {
+      const objData = obj as any;
+
+      // Skip grid and ruler objects - they should never have controls
+      if (objData.isGridLine || objData.isRuler) {
+        return;
+      }
+
+      obj.set({
+        cornerColor: '#3B82F6',
+        cornerStrokeColor: '#ffffff',
+        cornerStyle: 'rect',
+        cornerSize: 12,
+        transparentCorners: false,
+        borderColor: '#3B82F6',
+        borderDashArray: [6, 4],
+      });
+      // Apply custom arrow renderers to existing objects
+      if (obj.controls) {
+        if (obj.controls.tl) obj.controls.tl.render = renderArrowCorner('nwse');
+        if (obj.controls.br) obj.controls.br.render = renderArrowCorner('nwse');
+        if (obj.controls.tr) obj.controls.tr.render = renderArrowCorner('nesw');
+        if (obj.controls.bl) obj.controls.bl.render = renderArrowCorner('nesw');
+        if (obj.controls.mt) obj.controls.mt.render = renderArrowEdge(true);
+        if (obj.controls.mb) obj.controls.mb.render = renderArrowEdge(true);
+        if (obj.controls.ml) obj.controls.ml.render = renderArrowEdge(false);
+        if (obj.controls.mr) obj.controls.mr.render = renderArrowEdge(false);
+      }
+    });
+    fabricCanvas.requestRenderAll();
+    
+    // Set canvas to context only if not disposed
+    if (!isDisposed) {
+      setCanvas(fabricCanvas);
+    }
+    
+    // Normalize all existing text objects with font stacks for special character support
+    normalizeCanvasTextFonts(fabricCanvas);
+
+    // Helper function to ensure Chemix rotation control is always present
+    const ensureChemixRotationControl = (obj: FabricObject | any) => {
+      if (!obj.controls) obj.controls = {};
+      if (!obj.controls.mtr) {
+        obj.controls.mtr = mtrControl;
+      }
+      obj.hasRotatingPoint = true;
+      obj.hasControls = true;
+      obj.rotatingPointOffset = 45;
+      obj.setCoords();
+    };
+
+    // Apply rotation control to all existing objects
+    fabricCanvas.getObjects().forEach((obj: FabricObject) => {
+      const customObj = obj as any;
+      if (!customObj.isControlHandle && !customObj.isHandleLine && !customObj.isGuideLine) {
+        ensureChemixRotationControl(obj);
+      }
+    });
+    fabricCanvas.requestRenderAll();
+
+    // Helper function to manage curved line control handle visibility
+    // Handles are only shown when in edit mode, not on selection
+    const manageCurvedLineHandles = (selectedObj: FabricObject | null) => {
+      // Manage handles for ALL curved lines on the canvas
+      let hiddenCount = 0;
+      let shownCount = 0;
+      fabricCanvas?.getObjects().forEach((obj) => {
+        if ((obj as any).isCurvedLine) {
+          const curveData = obj as any;
+
+          // If in edit mode: ensure handles are visible and interactive
+          if (curveData.isEditMode) {
+            if (curveData.controlHandle) {
+              curveData.controlHandle.set({
+                visible: true,
+                selectable: true,
+                evented: true,
+              });
+              shownCount++;
+            }
+            if (curveData.handleLines) {
+              curveData.handleLines.forEach((line: any) => {
+                line.set({
+                  visible: true,
+                  selectable: false,
+                  evented: false,
+                  hasControls: false,
+                  hasBorders: false,
+                });
+              });
+            }
+          } else {
+            // If NOT in edit mode: hide handles
+            if (curveData.controlHandle) {
+              curveData.controlHandle.set({
+                visible: false,
+                selectable: false,
+                evented: false,
+              });
+              hiddenCount++;
+            }
+            if (curveData.handleLines) {
+              curveData.handleLines.forEach((line: any) => {
+                line.set({
+                  visible: false,
+                  selectable: false,
+                  evented: false,
+                });
+              });
+            }
+          }
+        }
+      });
+
+      fabricCanvas?.renderAll();
+    };
+
+    // Track selected objects with debug and auto-fix for invisible text
+    fabricCanvas.on('selection:created', (e) => {
+      // Prevent selection of grid lines and rulers
+      if (e.selected && e.selected.some((obj: any) => obj.isGridLine || obj.isRuler)) {
+        fabricCanvas.discardActiveObject();
+        fabricCanvas.requestRenderAll();
+        return;
+      }
+
+      const rawSelected = e.selected?.[0] || null;
+      let uiSelected: FabricObject | null = rawSelected;
+
+      // If a control handle or guide line is selected, map to parent curved line for the UI
+      if (rawSelected && ((rawSelected as any).isControlHandle || (rawSelected as any).isHandleLine)) {
+        const parentCurve = fabricCanvas?.getObjects().find(obj => {
+          const curveData = obj as any;
+          return curveData.isCurvedLine &&
+                 (curveData.controlHandle === rawSelected ||
+                  curveData.handleLines?.includes(rawSelected));
+        }) as FabricObject | undefined;
+
+        uiSelected = parentCurve ?? null;
+      }
+
+      // Track first selected object for match width/height operations
+      firstSelectedObjectRef.current = rawSelected;
+
+      // Debug selection details
+      if (uiSelected) {
+        // Ensure rotation control is present
+        ensureChemixRotationControl(uiSelected);
+      }
+
+      // UI uses uiSelected (parent curve for handles)
+      setSelectedObject(uiSelected);
+      manageCurvedLineHandles(uiSelected);
+      
+      // Debug text object properties
+      debugTextObject(uiSelected, "Selection Created");
+      
+      // Auto-fix invisible text
+      if (uiSelected && fixInvisibleText(uiSelected, fabricCanvas!)) {
+        toast.info("Fixed invisible text (reset opacity/fill)");
+      }
+    });
+    
+    fabricCanvas.on('selection:updated', (e) => {
+      // Prevent selection of grid lines and rulers
+      if (e.selected && e.selected.some((obj: any) => obj.isGridLine || obj.isRuler)) {
+        fabricCanvas.discardActiveObject();
+        fabricCanvas.requestRenderAll();
+        return;
+      }
+
+      const rawSelected = e.selected?.[0] || null;
+      let uiSelected: FabricObject | null = rawSelected;
+
+      // If a control handle or guide line is selected, map to parent curved line for the UI
+      if (rawSelected && ((rawSelected as any).isControlHandle || (rawSelected as any).isHandleLine)) {
+        const parentCurve = fabricCanvas?.getObjects().find(obj => {
+          const curveData = obj as any;
+          return curveData.isCurvedLine &&
+                 (curveData.controlHandle === rawSelected ||
+                  curveData.handleLines?.includes(rawSelected));
+        }) as FabricObject | undefined;
+
+        uiSelected = parentCurve ?? null;
+      }
+
+      // Debug selection details
+      if (uiSelected) {
+        // Ensure rotation control is present
+        ensureChemixRotationControl(uiSelected);
+        fabricCanvas?.requestRenderAll();
+      }
+      
+      // UI uses uiSelected (parent curve for handles)
+      setSelectedObject(uiSelected);
+      manageCurvedLineHandles(uiSelected);
+      
+      // Debug text object properties
+      debugTextObject(uiSelected, "Selection Updated");
+      
+      // Auto-fix invisible text
+      if (uiSelected && fixInvisibleText(uiSelected, fabricCanvas!)) {
+        toast.info("Fixed invisible text (reset opacity/fill)");
+      }
+    });
+    
+    // Track the last selected object before selection is cleared
+    let lastSelectedObject: any = null;
+    fabricCanvas.on('selection:created', (e) => {
+      // Ignore grid lines and rulers
+      if (e.selected?.[0] && !((e.selected[0] as any).isGridLine || (e.selected[0] as any).isRuler)) {
+        lastSelectedObject = e.selected[0];
+      }
+    });
+    fabricCanvas.on('selection:updated', (e) => {
+      // Ignore grid lines and rulers
+      if (e.selected?.[0] && !((e.selected[0] as any).isGridLine || (e.selected[0] as any).isRuler)) {
+        lastSelectedObject = e.selected[0];
+      }
+    });
+
+    fabricCanvas.on('selection:cleared', () => {
+      setSelectedObject(null);
+      manageCurvedLineHandles(null);
+
+      // Clear first selected object tracking
+      firstSelectedObjectRef.current = null;
+
+      // Exit edit mode when selection is cleared, UNLESS we just cleared an anchor/control handle
+      // (which happens when clicking between anchor points)
+      if (isBezierEditMode) {
+        const wasEditModeHandle = lastSelectedObject?.isAnchorHandle || lastSelectedObject?.isControlHandle;
+        if (!wasEditModeHandle) {
+          exitBezierEditMode();
+        }
+      }
+
+      lastSelectedObject = null;
+    });
+
+    // Normalize fonts when text editing starts
+    fabricCanvas.on('text:editing:entered', (e: any) => {
+      if (e.target) {
+        normalizeEditingTextFont(e.target);
+        fabricCanvas?.requestRenderAll();
+      }
+    });
+
+    // Normalize fonts when text content changes (safety net)
+    fabricCanvas.on('text:changed', (e: any) => {
+      const target = e.target;
+      if (target && (target.type === 'textbox' || target.type === 'text')) {
+        normalizeEditingTextFont(target);
+        target.dirty = true;
+        fabricCanvas?.requestRenderAll();
+      }
+    });
+
+    // Finalize fonts and layout when exiting edit mode
+    fabricCanvas.on('text:editing:exited', (e: any) => {
+      const target = e.target;
+      if (target && (target.type === 'textbox' || target.type === 'text')) {
+        normalizeEditingTextFont(target);
+        if (typeof target.initDimensions === 'function') {
+          target.initDimensions();
+        }
+
+        // Update callout label if editing a legend entry
+        if ((target as any).calloutId) {
+          const calloutId = (target as any).calloutId;
+          const newLabel = target.text || '';
+
+          // Update the callout's label
+          const registry = (fabricCanvas as any).calloutRegistry as Map<string, any> | undefined;
+          if (registry) {
+            const entry = registry.get(calloutId);
+            if (entry && entry.group) {
+              (entry.group as any).calloutLabel = newLabel;
+            }
+          }
+
+          // Rebuild legend to reflect changes
+          createOrUpdateLegend(fabricCanvas);
+        }
+        if (typeof target.setCoords === 'function') {
+          target.setCoords();
+        }
+        target.dirty = true;
+        fabricCanvas?.requestRenderAll();
+      }
+    });
+
+    // Alt+Drag duplication handlers
+    fabricCanvas.on('mouse:down', async (e) => {
+      const activeObject = fabricCanvas?.getActiveObject();
+      
+      if (e.e.altKey && activeObject && activeTool === 'select') {
+        e.e.preventDefault();
+        
+        try {
+          const cloned = await activeObject.clone();
+          cloned.set({
+            left: (activeObject.left || 0) + 10,
+            top: (activeObject.top || 0) + 10,
+            evented: true,
+          });
+          
+          fabricCanvas?.add(cloned);
+          fabricCanvas?.setActiveObject(cloned);
+          clonedObjectRef.current = cloned;
+          setIsDuplicating(true);
+          fabricCanvas?.requestRenderAll();
+        } catch (error) {
+          console.error('Failed to clone object:', error);
+        }
+      }
+    });
+
+    fabricCanvas.on('mouse:up', () => {
+      if (isDuplicating) {
+        setIsDuplicating(false);
+        clonedObjectRef.current = null;
+        toast.success("Object duplicated", { duration: 1000, className: 'animate-fade-in' });
+      }
+    });
+
+    // Handle text box resize - track scaling state to avoid feedback loops
+    let isScalingTextBox = false;
+
+    fabricCanvas.on('object:scaling', (e) => {
+      if (e.target && isTextBox(e.target)) {
+        isScalingTextBox = true;
+      }
+    });
+
+    fabricCanvas.on('mouse:up', () => {
+      if (isScalingTextBox) {
+        const obj = fabricCanvas?.getActiveObject();
+        if (obj && isTextBox(obj)) {
+          handleTextBoxResize(obj);
+          fabricCanvas?.requestRenderAll();
+        }
+        isScalingTextBox = false;
+      }
+    });
+
+    // Helper function to handle image placeholder file selection
+    const handleImagePlaceholderClick = (placeholderObj: FabricObject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      
+      // Track if file was selected to prevent premature removal
+      let fileSelected = false;
+      
+      input.onchange = async (event) => {
+        const file = (event.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        
+        fileSelected = true;
+
+        try {
+          const reader = new FileReader();
+          reader.onload = async (e) => {
+            const dataUrl = e.target?.result as string;
+            
+            // Load image with CORS handling
+            const imgElement = await loadImageWithCORS(dataUrl);
+            
+            // Get placeholder bounds and position
+            const placeholderLeft = placeholderObj.left || 0;
+            const placeholderTop = placeholderObj.top || 0;
+            const placeholderWidth = placeholderObj.getScaledWidth();
+            const placeholderHeight = placeholderObj.getScaledHeight();
+            
+            // Create new FabricImage
+            const fabricImage = new FabricImage(imgElement, {
+              left: placeholderLeft,
+              top: placeholderTop,
+              scaleX: placeholderWidth / imgElement.width,
+              scaleY: placeholderHeight / imgElement.height,
+              crossOrigin: 'anonymous',
+            });
+            
+            // Remove placeholder and add image only after successful load
+            fabricCanvas?.remove(placeholderObj);
+            fabricCanvas?.add(fabricImage);
+            fabricCanvas?.setActiveObject(fabricImage);
+            fabricCanvas?.renderAll();
+            
+            toast.success("Image added successfully!");
+          };
+          reader.readAsDataURL(file);
+        } catch (error) {
+          console.error("Error loading image:", error);
+          toast.error("Failed to load image");
+        }
+      };
+      
+      // Handle cancel - keep placeholder intact
+      input.addEventListener('cancel', () => {
+        // File picker was cancelled, placeholder stays
+      });
+      
+      input.click();
+    };
+
+    // Handle single-click on selected image placeholder (click again to add image)
+    let lastPlaceholderClickTime = 0;
+    let lastClickedPlaceholder: FabricObject | null = null;
+    
+    fabricCanvas.on('mouse:down', (e) => {
+      const obj = e.target;
+      
+      // Check if clicking on an image placeholder
+      if (obj && (obj as any).isImagePlaceholder) {
+        const now = Date.now();
+        
+        // If same placeholder clicked within 400ms, treat as double-click
+        if (lastClickedPlaceholder === obj && now - lastPlaceholderClickTime < 400) {
+          handleImagePlaceholderClick(obj);
+          lastClickedPlaceholder = null;
+          lastPlaceholderClickTime = 0;
+          return;
+        }
+        
+        // First click - just select it and record
+        lastClickedPlaceholder = obj;
+        lastPlaceholderClickTime = now;
+      } else {
+        // Clicked elsewhere, reset
+        lastClickedPlaceholder = null;
+        lastPlaceholderClickTime = 0;
+      }
+    });
+
+    // Handle double-click for image placeholders, text box editing, and bezier paths
+    fabricCanvas.on('mouse:dblclick', (e) => {
+      const obj = e.target;
+
+      // Check edit mode states
+      const isAlreadyInBezierEditMode = isBezierEditMode || !!bezierEditModeRef.current?.path;
+      const isAlreadyInMembraneEditMode = isMembraneEditMode || !!membraneEditModeRef.current?.isActive?.();
+
+      // Handle membrane shape double-click - enter edit mode
+      // IMPORTANT: Check this BEFORE isBezierPath since membranes also store bezier points
+      // Check for both vector membranes (isMembraneShape) and rasterized membranes (isRasterizedMembrane)
+      if (obj && ((obj as any).isMembraneShape || (obj as any).isRasterizedMembrane) && !isMembraneEditMode) {
+        saveState();
+
+        // Dynamically import MembraneEditMode
+        import('@/lib/membraneEditMode').then(async ({ MembraneEditMode }) => {
+          // Create or reuse MembraneEditMode
+          if (!membraneEditModeRef.current) {
+            membraneEditModeRef.current = new MembraneEditMode(fabricCanvas, undefined, saveState);
+          }
+
+          await membraneEditModeRef.current.activate(obj as any);
+          setIsMembraneEditMode(true);
+          setEditingMembrane(obj);
+          toast.info("Membrane edit mode active. Edit path or icons.");
+        });
+        return;
+      }
+
+      // Handle bezier path double-click - enter edit mode (unless already in edit mode)
+      if (obj && (obj as any).isBezierPath) {
+        // If in membrane edit mode, let the membrane's BezierEditMode handle the double-click
+        // The virtual path has excludeFromExport=true to distinguish it from regular bezier paths
+        if (isAlreadyInMembraneEditMode) {
+          // Let the membrane edit mode's BezierEditMode handler process this for adding anchor points
+          return;
+        }
+        if (isAlreadyInBezierEditMode) {
+          // Let the bezierEditMode handler process this for adding anchor points
+          return;
+        }
+        // Create or reuse BezierEditMode with saveState callback (uses ref, no stale closures)
+        if (!bezierEditModeRef.current) {
+          bezierEditModeRef.current = new BezierEditMode(fabricCanvas, undefined, saveState);
+        }
+        bezierEditModeRef.current.activate(obj as any);
+        setIsBezierEditMode(true);
+        setEditingBezierPath(obj);
+        toast.info("Edit mode active. Double-click path to add points, drag anchors to reshape.");
+        return;
+      }
+
+      // Handle curved line double-click - enter edit mode (unless already in edit mode)
+      if (obj && (obj as any).isCurvedLine && !isCurvedLineEditMode) {
+        // Create or reuse CurvedLineEditMode with saveState callback
+        if (!curvedLineEditModeRef.current) {
+          curvedLineEditModeRef.current = new CurvedLineEditMode(fabricCanvas, saveState);
+        }
+        curvedLineEditModeRef.current.activate(obj as any);
+        setIsCurvedLineEditMode(true);
+        setEditingCurvedLine(obj);
+        // Force handle visibility update
+        manageCurvedLineHandles(obj);
+        toast.info("Edit mode active. Drag control point to adjust curve.");
+        return;
+      }
+
+      // Handle image placeholder double-click - open file picker
+      if (obj && (obj as any).isImagePlaceholder) {
+        handleImagePlaceholderClick(obj);
+        return;
+      }
+
+      // Handle legend label editing
+      if (obj && (obj as any).isLegendLabel && obj.type === 'textbox') {
+        (obj as any).enterEditing();
+        (obj as any).selectAll?.();
+        fabricCanvas?.requestRenderAll();
+        return;
+      }
+
+      // Handle text box editing
+      if (obj && isTextBox(obj)) {
+        const textElement = getTextBoxTextElement(obj);
+        if (textElement) {
+          fabricCanvas?.setActiveObject(textElement);
+          textElement.enterEditing();
+          textElement.selectAll();
+          fabricCanvas?.requestRenderAll();
+        }
+      }
+    });
+
+    // Track drag state to prevent intermediate saves
+    let isDragging = false;
+
+    // Store original opacity before transformations to preserve user settings
+    fabricCanvas.on('mouse:down', (e) => {
+      if (e.target && !originalOpacityMapRef.current.has(e.target)) {
+        originalOpacityMapRef.current.set(e.target, e.target.opacity || 1);
+      }
+      // Mark that we're potentially starting a drag
+      if (e.target && !((e.target as any).isGridLine || (e.target as any).isRuler)) {
+        isDragging = true;
+      }
+    });
+
+    // Track multi-object drag operations for transaction grouping
+    fabricCanvas.on('mouse:down', (e) => {
+      const activeObj = fabricCanvas.getActiveObject();
+      if (activeObj && activeObj.type === 'activeSelection') {
+        activeDragRef.current = {
+          isMultiObject: true,
+          startTime: Date.now()
+        };
+        beginHistoryTransaction();
+      }
+    });
+
+    // Add drag feedback and snap-to-grid
+    fabricCanvas.on('object:moving', (e) => {
+      if (e.target) {
+        // Begin transaction on first move
+        if (!activeDragRef.current) {
+          beginHistoryTransaction();
+          activeDragRef.current = { isMultiObject: false };
+        }
+
+        e.target.set({ opacity: 0.85 }); // Slightly transparent while dragging
+
+        // Snap to grid if enabled - access current values from canvas context
+        const currentSnapToGrid = (window as any).canvasContext?.snapToGrid || false;
+        const currentGridSize = (window as any).canvasContext?.gridSize || 20;
+
+        if (currentSnapToGrid) {
+          const snappedLeft = Math.round((e.target.left || 0) / currentGridSize) * currentGridSize;
+          const snappedTop = Math.round((e.target.top || 0) / currentGridSize) * currentGridSize;
+          e.target.set({
+            left: snappedLeft,
+            top: snappedTop,
+          });
+          e.target.setCoords(); // Update coordinates for proper rendering
+        }
+
+        fabricCanvas?.requestRenderAll(); // Force canvas to re-render during drag
+      }
+    });
+
+    fabricCanvas.on('object:modified', (e) => {
+      // Clear drag flag - drag is complete
+      isDragging = false;
+
+      if (e.target) {
+        // Restore original opacity instead of hardcoding to 1
+        const originalOpacity = originalOpacityMapRef.current.get(e.target);
+        if (originalOpacity !== undefined) {
+          e.target.set({ opacity: originalOpacity });
+          originalOpacityMapRef.current.delete(e.target);
+        }
+
+        fabricCanvas?.requestRenderAll();
+
+        // Log all relevant properties for debugging
+        // Don't save state for edit mode handles OR objects being edited
+        const isEditModeHandle = (e.target as any).excludeFromExport ||
+                                  (e.target as any).isAnchorHandle ||
+                                  (e.target as any).isControlHandle;
+
+        const isObjectBeingEdited = (e.target as any).isEditMode === true;
+
+        if (isEditModeHandle) {
+          return;
+        }
+
+        if (isObjectBeingEdited) {
+          return;
+        }
+
+        // Commit transaction (for both single and multi-object drags)
+        if (activeDragRef.current) {
+          // Commit after brief delay to catch related events
+          setTimeout(() => {
+            commitHistoryTransaction();
+            activeDragRef.current = null;
+          }, 50);
+        } else {
+          // Non-drag modification - save immediately
+          saveState();
+        }
+      }
+    });
+
+    // Fallback cleanup for multi-object transactions
+    fabricCanvas.on('mouse:up', () => {
+      // Clear drag flag - mouse released
+      isDragging = false;
+
+      if (activeDragRef.current) {
+        // Fallback commit if object:modified didn't fire
+        setTimeout(() => {
+          if (activeDragRef.current) {
+            commitHistoryTransaction();
+            activeDragRef.current = null;
+          }
+        }, 100);
+      }
+    });
+
+    // Track the last selected callout to detect when it's deselected
+    let lastSelectedCallout: any = null;
+    let legendUpdateTimeout: NodeJS.Timeout | null = null;
+
+    // Debounced legend update function
+    const scheduleLegendUpdate = () => {
+      if (legendUpdateTimeout) {
+        clearTimeout(legendUpdateTimeout);
+      }
+      legendUpdateTimeout = setTimeout(() => {
+        createOrUpdateLegend(fabricCanvas);
+        legendUpdateTimeout = null;
+      }, 100);
+    };
+
+    fabricCanvas.on('selection:created', (e) => {
+      // Ignore grid lines and rulers
+      if (e.selected && e.selected[0] && !((e.selected[0] as any).isGridLine || (e.selected[0] as any).isRuler) && isCallout(e.selected[0])) {
+        lastSelectedCallout = e.selected[0];
+      }
+    });
+
+    fabricCanvas.on('selection:updated', (e) => {
+      // When selection changes from a callout, update legend
+      if (lastSelectedCallout && isCallout(lastSelectedCallout)) {
+        scheduleLegendUpdate();
+      }
+
+      // Ignore grid lines and rulers
+      if (e.selected && e.selected[0] && !((e.selected[0] as any).isGridLine || (e.selected[0] as any).isRuler) && isCallout(e.selected[0])) {
+        lastSelectedCallout = e.selected[0];
+      } else {
+        lastSelectedCallout = null;
+      }
+    });
+
+    fabricCanvas.on('selection:cleared', (e) => {
+      // When a callout is deselected, update legend to reflect any style changes
+      if (lastSelectedCallout && isCallout(lastSelectedCallout)) {
+        scheduleLegendUpdate();
+        lastSelectedCallout = null;
+      }
+    });
+
+    // Listen for any changes to callout objects
+    fabricCanvas.on('object:modified', (e) => {
+      if (e.target && isCallout(e.target)) {
+        scheduleLegendUpdate();
+      }
+    });
+
+    // Listen for property changes on the selected object
+    fabricCanvas.on('after:render', () => {
+      // Update legend when rendering and a callout is selected
+      // The scheduleLegendUpdate function already debounces, so no need to throttle here
+      if (lastSelectedCallout && isCallout(lastSelectedCallout)) {
+        scheduleLegendUpdate();
+      }
+    });
+
+    // Clean up opacity map when objects are removed to prevent memory leaks
+    fabricCanvas.on('object:removed', (e) => {
+      if (e.target) {
+        originalOpacityMapRef.current.delete(e.target);
+
+        // Renumber callouts if a callout was deleted
+        if (isCallout(e.target)) {
+          const registry = (fabricCanvas as any).calloutRegistry as Map<string, any> | undefined;
+          if (registry) {
+            const calloutId = (e.target as any).calloutId;
+            registry.delete(calloutId);
+            renumberCallouts(fabricCanvas);
+            createOrUpdateLegend(fabricCanvas);
+          }
+        }
+
+        // Save state for undo/redo after object removal
+        // Only save if it's a user object (not grid lines or rulers) AND not during a drag operation
+        if (!(e.target as any).isGridLine && !(e.target as any).isRuler && !isDragging) {
+          saveState();
+        } else if (isDragging) {
+        }
+      }
+    });
+
+    fabricCanvas.on('mouse:move', (e) => {
+      if (activeTool === 'select') {
+        const activeObj = fabricCanvas?.getActiveObject();
+
+        // Check if hovering over rotation control
+        if (activeObj && (activeObj as any).__corner === 'mtr') {
+          const isRotating = (activeObj as any).isRotating;
+          fabricCanvas?.setCursor(isRotating ? 'grabbing' : 'grab');
+          return;
+        }
+
+        // Alt key for copy cursor
+        if (e.e.altKey && activeObj) {
+          fabricCanvas?.setCursor('copy');
+        }
+      }
+    });
+
+
+    // Listen for custom event to add icons to canvas
+    handleAddIcon = async (event: CustomEvent) => {
+      const { svgData, iconId } = event.detail;
+
+      try {
+        const startTime = performance.now();
+
+        // Import iconCache (with fallback if import fails)
+        let iconCache = null;
+        let cached = null;
+        try {
+          const iconCacheModule = await import('@/lib/iconCache');
+          iconCache = iconCacheModule.iconCache;
+          cached = iconId ? await iconCache.get(iconId) : null;
+        } catch (cacheError) {
+          console.warn('Icon cache unavailable:', cacheError);
+          // Continue without cache
+        }
+        
+        if (cached) {
+          // Deserialize cached Fabric object
+          const parsePromise = loadSVGFromString(cached.svgContent);
+          const { objects, options } = await parsePromise;
+          const group = util.groupSVGElements(objects, options);
+          
+          // Calculate complexity and apply optimizations
+          const complexity = calculateObjectComplexity(group);
+          if (shouldSimplifyControls(complexity)) {
+            applyComplexityOptimizations(group, complexity);
+          }
+          
+          // Scale and position
+          const maxW = (fabricCanvas?.width || 0) * 0.6;
+          const maxH = (fabricCanvas?.height || 0) * 0.6;
+          const scale = Math.min(maxW / (group.width || 1), maxH / (group.height || 1), 1);
+          group.scale(scale);
+          group.set({
+            left: (fabricCanvas?.width || 0) / 2 - (group.width || 0) * scale / 2,
+            top: (fabricCanvas?.height || 0) / 2 - (group.height || 0) * scale / 2,
+          });
+
+          // Mark as library icon for reference-based saving
+          if (iconId) {
+            (group as any).iconId = iconId;
+            (group as any).isLibraryIcon = true;
+            console.log(`[ICON ADD CACHED] Marked icon with iconId=${iconId}, isLibraryIcon=true`);
+          }
+
+          fabricCanvas?.add(group);
+          fabricCanvas?.setActiveObject(group);
+          fabricCanvas?.requestRenderAll();
+          toast.success("Icon added to canvas (cached)");
+          return;
+        }
+        
+        // Process SVG with Web Worker, fallback to main thread if worker fails
+        let processedSVG = svgData;
+        let complexity = 0;
+        
+        try {
+          // Attempt Web Worker processing
+          const worker = new Worker(new URL('@/lib/svgWorker.ts', import.meta.url), { type: 'module' });
+          
+          const workerResult = await new Promise<any>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              worker.terminate();
+              reject(new Error('Worker timeout'));
+            }, 10000);
+            
+            worker.onmessage = (e) => {
+              clearTimeout(timeout);
+              worker.terminate();
+              resolve(e.data);
+            };
+            
+            worker.onerror = (err) => {
+              clearTimeout(timeout);
+              worker.terminate();
+              reject(err);
+            };
+            
+            worker.postMessage({ type: 'parse', svgContent: svgData, id: iconId || 'temp' });
+          });
+          
+          // Show any warnings from worker (but continue loading)
+          if (workerResult.data?.warnings?.length > 0) {
+            workerResult.data.warnings.forEach((warning: string) => {
+              toast.warning(warning, {
+                description: 'Icon will still load, but performance may be affected.',
+                duration: 5000
+              });
+            });
+          }
+          
+          processedSVG = workerResult.data.svgContent;
+          complexity = workerResult.data.complexity;
+        } catch (workerError) {
+          // FALLBACK: Process on main thread if worker fails
+          console.warn('Web Worker failed, falling back to main thread:', workerError);
+          
+          // Calculate complexity on main thread
+          complexity = calculateSVGComplexityMainThread(svgData);
+          
+          // Apply simplification for complex SVGs
+          if (complexity > 500 || svgData.length > 512 * 1024) {
+            processedSVG = simplifySVGMainThread(svgData);
+          }
+        }
+        
+        // Sanitize SVG before parsing to fix namespace issues
+        const sanitizedSVG = sanitizeSVGNamespaces(processedSVG);
+        
+        // Parse sanitized SVG string with timeout
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('SVG parsing timeout')), 15000);
+        });
+        
+        const parsePromise = loadSVGFromString(sanitizedSVG);
+        const { objects, options } = await Promise.race([parsePromise, timeoutPromise]) as Awaited<ReturnType<typeof loadSVGFromString>>;
+        
+        const parseTime = performance.now() - startTime;
+        const group = util.groupSVGElements(objects, options);
+        
+        // Calculate object complexity and apply optimizations
+        const objectComplexity = calculateObjectComplexity(group);
+        if (shouldSimplifyControls(objectComplexity)) {
+          applyComplexityOptimizations(group, objectComplexity);
+          toast.info(`Complex icon (${objectComplexity.totalObjects} objects)`, {
+            description: 'Simplified controls applied for better performance'
+          });
+        }
+        
+        // Cache the parsed icon
+        if (iconId && iconCache) {
+          iconCache.set({
+            id: iconId,
+            svgContent: sanitizedSVG,
+            parsedData: group.toObject(),
+            timestamp: Date.now(),
+            complexity: complexity,
+            accessCount: 0,
+            lastAccessTime: Date.now()
+          });
+        }
+        
+        // Scale to fit within 60% of canvas area
+        const maxW = (fabricCanvas?.width || 0) * 0.6;
+        const maxH = (fabricCanvas?.height || 0) * 0.6;
+        const scale = Math.min(maxW / (group.width || 1), maxH / (group.height || 1), 1);
+        group.scale(scale);
+
+        // Center on canvas and mark as library icon
+        group.set({
+          left: (fabricCanvas?.width || 0) / 2 - (group.width || 0) * scale / 2,
+          top: (fabricCanvas?.height || 0) / 2 - (group.height || 0) * scale / 2,
+        });
+
+        // Mark as library icon for reference-based saving
+        if (iconId) {
+          (group as any).iconId = iconId;
+          (group as any).isLibraryIcon = true;
+          console.log(`[ICON ADD] Marked icon with iconId=${iconId}, isLibraryIcon=true, type=${group.type}`);
+        } else {
+          console.log(`[ICON ADD] No iconId provided for icon`);
+        }
+
+        fabricCanvas?.add(group);
+        fabricCanvas?.setActiveObject(group);
+        fabricCanvas?.requestRenderAll();
+        toast.success("Icon added to canvas");
+      } catch (error) {
+        console.error("Error adding icon:", error);
+        console.error("SVG content preview:", svgData.substring(0, 500));
+        
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        if (errorMessage.includes('timeout')) {
+          toast.error("Icon is too large to process. Please try a simpler icon.");
+        } else if (errorMessage.toLowerCase().includes('namespace') || errorMessage.toLowerCase().includes('parse')) {
+          toast.error("Invalid SVG format. The icon may have formatting issues.");
+        } else {
+          toast.error(`Failed to add icon: ${errorMessage}`);
+        }
+      }
+    };
+
+    window.addEventListener("addIconToCanvas", handleAddIcon as EventListener);
+
+    // Handle adding asset from library
+    handleAddAsset = async (event: CustomEvent) => {
+      const { content, assetId } = event.detail;
+      if (!fabricCanvas || !content) return;
+
+      try {
+        toast("Loading asset...");
+        
+        // Try to parse as SVG first
+        if (content.trim().startsWith('<svg') || content.includes('xmlns="http://www.w3.org/2000/svg"')) {
+          // Sanitize SVG before parsing
+          const sanitizedContent = sanitizeSVGNamespaces(content);
+          const { objects, options } = await loadSVGFromString(sanitizedContent);
+          const group = util.groupSVGElements(objects, options);
+          
+          const maxW = (fabricCanvas.width || 0) * 0.6;
+          const maxH = (fabricCanvas.height || 0) * 0.6;
+          const scale = Math.min(maxW / (group.width || 1), maxH / (group.height || 1), 1);
+          group.scale(scale);
+          
+          group.set({
+            left: (fabricCanvas.width || 0) / 2 - (group.width || 0) * scale / 2,
+            top: (fabricCanvas.height || 0) / 2 - (group.height || 0) * scale / 2,
+          });
+          
+          fabricCanvas.add(group);
+          fabricCanvas.setActiveObject(group);
+          fabricCanvas.requestRenderAll();
+          toast.success("Asset added to canvas");
+        } else {
+          // Handle as data URL image with CORS support
+          try {
+            const img = await loadImageWithCORS(content);
+            const fabricImage = new FabricImage(img, {
+              left: (fabricCanvas.width || 0) / 2,
+              top: (fabricCanvas.height || 0) / 2,
+              originX: "center",
+              originY: "center",
+            });
+            
+            const maxW = (fabricCanvas.width || 0) * 0.6;
+            const maxH = (fabricCanvas.height || 0) * 0.6;
+            const scale = Math.min(maxW / fabricImage.width!, maxH / fabricImage.height!, 1);
+            fabricImage.scale(scale);
+            
+            fabricCanvas.add(fabricImage);
+            fabricCanvas.setActiveObject(fabricImage);
+            fabricCanvas.requestRenderAll();
+            toast.success("Asset added to canvas");
+          } catch (error) {
+            console.error("Failed to load image:", error);
+            toast.error("Failed to load image asset");
+          }
+        }
+      } catch (error) {
+        console.error("Error adding asset:", error);
+        toast.error("Failed to add asset to canvas");
+      }
+    };
+
+    window.addEventListener("addAssetToCanvas", handleAddAsset as EventListener);
+    };
+
+    initCanvas();
+    
+    // Cleanup returned DIRECTLY from useEffect, not from async function
+    return () => {
+      isDisposed = true;
+      if (handleAddIcon) {
+        window.removeEventListener("addIconToCanvas", handleAddIcon as EventListener);
+      }
+      if (handleAddAsset) {
+        window.removeEventListener("addAssetToCanvas", handleAddAsset as EventListener);
+      }
+      setCanvas(null);
+      if (fabricCanvas) {
+        fabricCanvas.dispose();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Prevent default context menu on canvas
+  useEffect(() => {
+    const canvasElement = canvasRef.current;
+    if (!canvasElement) return;
+
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+
+    canvasElement.addEventListener('contextmenu', handleContextMenu);
+
+    return () => {
+      canvasElement.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, []);
+
+  // Handle canvas dimension changes
+  useEffect(() => {
+    if (!canvas || !canvas.lowerCanvasEl) return;
+
+    try {
+      canvas.setDimensions({
+      width: canvasDimensions.width,
+      height: canvasDimensions.height,
+    });
+    canvas.requestRenderAll();
+    } catch (error) {
+      console.error("Error setting canvas dimensions:", error);
+    }
+  }, [canvas, canvasDimensions]);
+
+  // Handle zoom changes with culling
+  useEffect(() => {
+    if (!canvas) return;
+
+    const zoomLevel = zoom / 100;
+
+    // Don't use Fabric's internal zoom - we handle it via CSS transform
+    canvas.setZoom(1);
+    canvas.requestRenderAll();
+
+    // Trigger culling after zoom change
+    if (throttledCullRef.current) {
+      throttledCullRef.current();
+    }
+  }, [canvas, zoom]);
+
+  // Handle background color changes
+  useEffect(() => {
+    if (!canvas) return;
+
+    if (backgroundGradient) {
+      const width = canvas.width || 1200;
+      const height = canvas.height || 800;
+
+      let coords: any;
+
+      if (gradientType === 'linear') {
+        // Calculate coordinates based on gradient angle
+        // Convert angle to radians
+        const angleRad = (gradientAngle - 90) * (Math.PI / 180);
+
+        // Calculate the diagonal length
+        const diagonal = Math.sqrt(width * width + height * height);
+
+        // Calculate end points based on angle
+        const x1 = width / 2 - (Math.cos(angleRad) * diagonal) / 2;
+        const y1 = height / 2 - (Math.sin(angleRad) * diagonal) / 2;
+        const x2 = width / 2 + (Math.cos(angleRad) * diagonal) / 2;
+        const y2 = height / 2 + (Math.sin(angleRad) * diagonal) / 2;
+
+        coords = { x1, y1, x2, y2 };
+      } else {
+        // Radial gradient with user-defined center and radius
+        const centerX = width * gradientCenterX;
+        const centerY = height * gradientCenterY;
+        const r2 = Math.max(width, height) * (gradientRadius / 100);
+
+        coords = {
+          x1: centerX,
+          y1: centerY,
+          x2: centerX,
+          y2: centerY,
+          r1: 0,
+          r2: r2,
+        };
+      }
+
+      // Create gradient based on user settings
+      const gradient = new Gradient({
+        type: gradientType,
+        coords,
+        colorStops: [
+          { offset: 0, color: gradientStartColor },
+          { offset: 1, color: gradientEndColor }
+        ]
+      });
+      canvas.backgroundColor = gradient;
+    } else {
+      canvas.backgroundColor = backgroundColor;
+    }
+
+    canvas.requestRenderAll();
+  }, [canvas, backgroundColor, backgroundGradient, gradientStartColor, gradientEndColor, gradientType, gradientAngle, gradientCenterX, gradientCenterY, gradientRadius]);
+
+  // Handle grid rendering - redraws on zoom changes to prevent double grid
+  useEffect(() => {
+    if (!canvas) return;
+
+    // Collect all grid objects to remove
+    const objectsToRemove = canvas.getObjects().filter(obj => (obj as any).isGridLine);
+    
+    // Remove them all at once
+    objectsToRemove.forEach(obj => canvas.remove(obj));
+
+    // Draw grid if enabled
+    if (gridEnabled) {
+      const width = canvas.width || 1200;
+      const height = canvas.height || 800;
+
+      const gridObjects: FabricObject[] = [];
+
+      if (gridPattern === 'lines') {
+        // Optimized line grid using canvas pattern - much faster than individual lines
+        const patternCanvas = document.createElement('canvas');
+        patternCanvas.width = gridSize;
+        patternCanvas.height = gridSize;
+        const patternCtx = patternCanvas.getContext('2d')!;
+
+        // Draw grid lines in the pattern
+        patternCtx.strokeStyle = '#e0e0e0';
+        patternCtx.lineWidth = 1;
+
+        // Vertical line on the left edge
+        patternCtx.beginPath();
+        patternCtx.moveTo(0, 0);
+        patternCtx.lineTo(0, gridSize);
+        patternCtx.stroke();
+
+        // Horizontal line on the top edge
+        patternCtx.beginPath();
+        patternCtx.moveTo(0, 0);
+        patternCtx.lineTo(gridSize, 0);
+        patternCtx.stroke();
+
+        // Create a single rectangle with the pattern as fill
+        const gridRect = new Rect({
+          left: 0,
+          top: 0,
+          width: width,
+          height: height,
+          fill: new Pattern({
+            source: patternCanvas,
+            repeat: 'repeat'
+          }),
+          selectable: false,
+          evented: false,
+          hoverCursor: 'default',
+          excludeFromExport: true,
+        });
+
+        (gridRect as any).isGridLine = true;
+        gridObjects.push(gridRect);
+      } else if (gridPattern === 'dots') {
+        // Optimized dot grid using canvas pattern - much faster than individual circles
+        const patternCanvas = document.createElement('canvas');
+        patternCanvas.width = gridSize;
+        patternCanvas.height = gridSize;
+        const patternCtx = patternCanvas.getContext('2d')!;
+
+        // Draw a single dot in the pattern
+        patternCtx.fillStyle = '#d0d0d0';
+        patternCtx.beginPath();
+        patternCtx.arc(gridSize / 2, gridSize / 2, 1.5, 0, Math.PI * 2);
+        patternCtx.fill();
+
+        // Create a single rectangle with the pattern as fill
+        const gridRect = new Rect({
+          left: 0,
+          top: 0,
+          width: width,
+          height: height,
+          fill: new Pattern({
+            source: patternCanvas,
+            repeat: 'repeat'
+          }),
+          selectable: false,
+          evented: false,
+          hoverCursor: 'default',
+          excludeFromExport: true,
+        });
+
+        (gridRect as any).isGridLine = true;
+        gridObjects.push(gridRect);
+      } else if (gridPattern === 'isometric') {
+        // Optimized isometric grid using canvas pattern
+        const isoSize = gridSize * 2;
+        const angleRad = (30 * Math.PI) / 180;
+        const tanAngle = Math.tan(angleRad);
+
+        // Create pattern canvas - needs to be large enough to tile properly
+        const patternWidth = isoSize;
+        const patternHeight = isoSize;
+        const patternCanvas = document.createElement('canvas');
+        patternCanvas.width = patternWidth;
+        patternCanvas.height = patternHeight;
+        const patternCtx = patternCanvas.getContext('2d')!;
+
+        patternCtx.strokeStyle = '#e0e0e0';
+        patternCtx.lineWidth = 1;
+
+        // Draw the isometric grid lines in the pattern
+        // Horizontal line at top
+        patternCtx.beginPath();
+        patternCtx.moveTo(0, 0);
+        patternCtx.lineTo(patternWidth, 0);
+        patternCtx.stroke();
+
+        // Diagonal line at +30 degrees
+        patternCtx.beginPath();
+        patternCtx.moveTo(0, 0);
+        patternCtx.lineTo(patternWidth, patternHeight * tanAngle);
+        patternCtx.stroke();
+
+        // Diagonal line at -30 degrees
+        patternCtx.beginPath();
+        patternCtx.moveTo(patternWidth, 0);
+        patternCtx.lineTo(0, patternHeight * tanAngle);
+        patternCtx.stroke();
+
+        // Create a single rectangle with the pattern as fill
+        const gridRect = new Rect({
+          left: 0,
+          top: 0,
+          width: width,
+          height: height,
+          fill: new Pattern({
+            source: patternCanvas,
+            repeat: 'repeat'
+          }),
+          selectable: false,
+          evented: false,
+          hoverCursor: 'default',
+          excludeFromExport: true,
+        });
+
+        (gridRect as any).isGridLine = true;
+        gridObjects.push(gridRect);
+      }
+
+      // Add all grid objects at once and send to back
+      gridObjects.forEach(obj => {
+        canvas.add(obj);
+        canvas.sendObjectToBack(obj);
+      });
+    }
+
+    canvas.requestRenderAll();
+  }, [canvas, gridEnabled, gridPattern, gridSize, zoom, canvasLoadVersion]);
+
+  // Handle rulers - separate from grid so they scale with zoom
+  useEffect(() => {
+    if (!canvas) return;
+
+    // Collect all ruler objects to remove
+    const rulersToRemove = canvas.getObjects().filter(obj => (obj as any).isRuler);
+    
+    // Remove them all at once
+    rulersToRemove.forEach(obj => canvas.remove(obj));
+
+    // Draw rulers if enabled
+    if (rulersEnabled) {
+      const width = canvas.width || 1200;
+      const height = canvas.height || 800;
+
+      // Top ruler
+      const topRuler = new Rect({
+        left: 0,
+        top: 0,
+        width: width,
+        height: 30,
+        fill: '#f5f5f5',
+        stroke: '#ddd',
+        strokeWidth: 1,
+        selectable: false,
+        evented: false,
+        hoverCursor: 'default',
+        excludeFromExport: true,
+      });
+      (topRuler as any).isRuler = true;
+      canvas.add(topRuler);
+      canvas.bringObjectToFront(topRuler);
+
+      // Left ruler
+      const leftRuler = new Rect({
+        left: 0,
+        top: 0,
+        width: 30,
+        height: height,
+        fill: '#f5f5f5',
+        stroke: '#ddd',
+        strokeWidth: 1,
+        selectable: false,
+        evented: false,
+        hoverCursor: 'default',
+        excludeFromExport: true,
+      });
+      (leftRuler as any).isRuler = true;
+      canvas.add(leftRuler);
+      canvas.bringObjectToFront(leftRuler);
+
+      // Add ruler marks - every gridSize px
+      for (let i = gridSize; i < width; i += gridSize) {
+        const mark = new Line([i, 0, i, 10], {
+          stroke: '#999',
+          strokeWidth: 1,
+          selectable: false,
+          evented: false,
+          excludeFromExport: true,
+        });
+        (mark as any).isRuler = true;
+        canvas.add(mark);
+        canvas.bringObjectToFront(mark);
+      }
+
+      for (let i = gridSize; i < height; i += gridSize) {
+        const mark = new Line([0, i, 10, i], {
+          stroke: '#999',
+          strokeWidth: 1,
+          selectable: false,
+          evented: false,
+          excludeFromExport: true,
+        });
+        (mark as any).isRuler = true;
+        canvas.add(mark);
+        canvas.bringObjectToFront(mark);
+      }
+    }
+
+    canvas.requestRenderAll();
+  }, [canvas, rulersEnabled, gridSize, canvasLoadVersion]);
+
+  // Custom PencilBrush class to store original points for re-smoothing
+  class FreeformPencilBrush extends PencilBrush {
+    createPath(pathData: any): Path {
+      const path = super.createPath(pathData);
+      // Store original decimated points for re-smoothing
+      const points = (this as any)._points;
+      (path as any).originalFreeformPoints = points ? points.map((p: any) => ({ x: p.x, y: p.y })) : [];
+      (path as any).currentSmoothingStrength = 0; // Start with no smoothing
+      return path;
+    }
+  }
+
+  // Handle freeform line drawing
+  useEffect(() => {
+    if (!canvas || isReadOnly) return;
+
+    if (activeTool === "freeform-line") {
+      canvas.isDrawingMode = true;
+      canvas.selection = false; // Disable selection while drawing
+
+      // Create and configure the custom pencil brush
+      const brush = new FreeformPencilBrush(canvas);
+      brush.color = "#000000";
+      brush.width = 2;
+      
+      // CRITICAL: Set decimate to very low for smooth curves
+      // decimate controls path simplification (0 = no simplification, keeps all points)
+      (brush as any).decimate = 0.01; // Keep almost all points for smooth curves
+      
+      // Ensure smooth rendering
+      (brush as any).strokeLineCap = "round";
+      (brush as any).strokeLineJoin = "round";
+      canvas.freeDrawingBrush = brush;
+
+      // Handle path creation
+      const handlePathCreated = (e: any) => {
+        const path = e.path as Path;
+        if (path) {
+          // Mark as freeform line
+          (path as any).isFreeformLine = true;
+          (path as any).startMarker = "none";
+          (path as any).endMarker = "none";
+          (path as any).lineThickness = 2;
+          
+          // Set path properties with round caps
+          path.set({
+            fill: null,
+            stroke: "#000000",
+            strokeWidth: 2,
+            strokeUniform: true,
+            strokeLineCap: "round",
+            strokeLineJoin: "round",
+          });
+
+          canvas.setActiveObject(path);
+          canvas.requestRenderAll();
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+        }
+      };
+
+      canvas.on("path:created", handlePathCreated);
+
+      return () => {
+        canvas.off("path:created", handlePathCreated);
+        canvas.isDrawingMode = false;
+        canvas.selection = true; // Re-enable selection
+      };
+    } else {
+      canvas.isDrawingMode = false;
+      canvas.selection = true;
+    }
+  }, [canvas, activeTool, isReadOnly]);
+
+  // Make all objects erasable by default
+  useEffect(() => {
+    if (!canvas) return;
+
+    const handleObjectAdded = (e: any) => {
+      const obj = e.target;
+      if (obj && !(obj as any).isGridLine && !(obj as any).isRuler) {
+        (obj as any).erasable = true;
+      }
+    };
+
+    // Set existing objects as erasable
+    canvas.getObjects().forEach((obj) => {
+      if (!(obj as any).isGridLine && !(obj as any).isRuler) {
+        (obj as any).erasable = true;
+      }
+    });
+
+    canvas.on("object:added", handleObjectAdded);
+
+    return () => {
+      canvas.off("object:added", handleObjectAdded);
+    };
+  }, [canvas]);
+
+  // Handle eraser tool - using @erase2d/fabric EraserBrush
+  useEffect(() => {
+    if (!canvas || isReadOnly) return;
+
+    if (activeTool === "eraser") {
+      canvas.isDrawingMode = true;
+      canvas.selection = false;
+
+      // Use EraserBrush from @erase2d/fabric package
+      const eraserBrush = new EraserBrush(canvas);
+      eraserBrush.width = 20;
+      canvas.freeDrawingBrush = eraserBrush;
+
+      canvas.defaultCursor = "crosshair";
+      canvas.hoverCursor = "crosshair";
+
+      // Listen to eraser events for save state
+      const handleEraserEnd = () => {
+        saveState();
+      };
+
+      if (typeof eraserBrush.on === 'function') {
+        eraserBrush.on("end", handleEraserEnd);
+      }
+
+      return () => {
+        // Safely remove event listener if method exists
+        if (typeof eraserBrush.off === 'function') {
+          eraserBrush.off("end", handleEraserEnd);
+        }
+        canvas.isDrawingMode = false;
+        canvas.selection = true;
+        canvas.defaultCursor = "default";
+        canvas.hoverCursor = "move";
+      };
+    }
+  }, [canvas, activeTool, saveState, isReadOnly]);
+
+  // Handle image insertion tool
+  useEffect(() => {
+    if (!canvas) return;
+
+    if (activeTool === "image") {
+      // Create a hidden file input
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = ".svg,.jpg,.jpeg,.png,image/svg+xml,image/jpeg,image/png";
+      fileInput.style.display = "none";
+      
+      fileInput.onchange = async (e: Event) => {
+        const target = e.target as HTMLInputElement;
+        const file = target.files?.[0];
+        
+        if (!file) return;
+
+        // Validate file type
+        const validTypes = ["image/svg+xml", "image/jpeg", "image/jpg", "image/png"];
+        const validExtensions = [".svg", ".jpg", ".jpeg", ".png"];
+        const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf("."));
+        
+        if (!validTypes.includes(file.type) && !validExtensions.includes(fileExtension)) {
+          toast.error("Invalid file format. Only SVG, JPG, and PNG files are allowed.");
+          return;
+        }
+
+        try {
+          const reader = new FileReader();
+          
+          reader.onload = async (event) => {
+            const imgUrl = event.target?.result as string;
+            
+            if (file.type === "image/svg+xml" || fileExtension === ".svg") {
+              // Handle SVG files
+              loadSVGFromString(imgUrl).then(({ objects, options }) => {
+                const group = util.groupSVGElements(objects, options);
+                
+                // Scale to fit within 60% of canvas
+                const maxW = (canvas.width || 0) * 0.6;
+                const maxH = (canvas.height || 0) * 0.6;
+                const scale = Math.min(maxW / (group.width || 1), maxH / (group.height || 1), 1);
+                group.scale(scale);
+                
+                // Center on canvas
+                group.set({
+                  left: (canvas.width || 0) / 2 - (group.width || 0) * scale / 2,
+                  top: (canvas.height || 0) / 2 - (group.height || 0) * scale / 2,
+                });
+                
+                canvas.add(group);
+                canvas.setActiveObject(group);
+                canvas.requestRenderAll();
+                toast.success("SVG image added to canvas");
+                
+                // Auto-save to library
+                window.dispatchEvent(new CustomEvent('saveUploadToLibrary', {
+                  detail: { file, content: imgUrl }
+                }));
+                
+                if (onShapeCreated) onShapeCreated();
+              }).catch((error) => {
+                console.error("Error loading SVG:", error);
+                toast.error("Failed to load SVG image");
+              });
+            } else {
+              // Handle JPG/PNG files with CORS support
+              try {
+                const img = await loadImageWithCORS(imgUrl);
+                const fabricImage = new FabricImage(img, {
+                  left: (canvas.width || 0) / 2,
+                  top: (canvas.height || 0) / 2,
+                  originX: "center",
+                  originY: "center",
+                });
+                
+                // Scale to fit within 60% of canvas
+                const maxW = (canvas.width || 0) * 0.6;
+                const maxH = (canvas.height || 0) * 0.6;
+                const scale = Math.min(maxW / fabricImage.width!, maxH / fabricImage.height!, 1);
+                fabricImage.scale(scale);
+                
+                canvas.add(fabricImage);
+                canvas.setActiveObject(fabricImage);
+                canvas.requestRenderAll();
+                toast.success("Image added to canvas");
+                
+                // Auto-save to library
+                window.dispatchEvent(new CustomEvent('saveUploadToLibrary', {
+                  detail: { file, content: imgUrl }
+                }));
+                
+                if (onShapeCreated) onShapeCreated();
+              } catch (error) {
+                console.error("Failed to load image:", error);
+                toast.error("Failed to load image");
+              }
+            }
+          };
+          
+          reader.onerror = () => {
+            toast.error("Failed to read file");
+          };
+          
+          reader.readAsDataURL(file);
+        } catch (error) {
+          console.error("Error loading image:", error);
+          toast.error("Failed to load image");
+        }
+      };
+
+      // Trigger the file input
+      document.body.appendChild(fileInput);
+      fileInput.click();
+      
+      // Clean up
+      setTimeout(() => {
+        document.body.removeChild(fileInput);
+      }, 100);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas, activeTool]);
+
+  // Enhanced Pen Tool with smooth bezier curves (draw.io style)
+  useEffect(() => {
+    if (!canvas || activeTool !== "pen") {
+      // Clean up bezier tool when switching away
+      if (bezierToolRef.current) {
+        const state = bezierToolRef.current.getState();
+        if (state.isDrawing && state.pointCount >= 2) {
+          // Auto-finish the path if we have at least 2 points
+          const path = bezierToolRef.current.finish();
+          if (path) {
+            toast.success("Bezier path created! Double-click to edit anchor points.");
+          }
+        } else {
+          // Cancel if incomplete
+          bezierToolRef.current.cancel();
+        }
+        bezierToolRef.current = null;
+      }
+      return;
+    }
+
+    // Disable selection and drawing mode while using pen tool
+    canvas.selection = false;
+    canvas.isDrawingMode = false;
+
+    // Initialize enhanced bezier tool
+    bezierToolRef.current = new EnhancedBezierTool(canvas, {
+      smooth: 0.5,
+      snap: true,
+    });
+
+    bezierToolRef.current.start();
+
+    const handleCanvasClick = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+
+      // Check if still drawing before and after adding point
+      const wasDrawing = bezierToolRef.current?.getState().isDrawing;
+      bezierToolRef.current?.addPoint(pointer.x, pointer.y);
+      const isStillDrawing = bezierToolRef.current?.getState().isDrawing;
+
+      // If bezier tool auto-finished (closed the path), switch to select
+      if (wasDrawing && !isStillDrawing) {
+        toast.success("Bezier path created! Double-click to edit anchor points.");
+        if (onShapeCreated) onShapeCreated();
+        saveState();
+        onToolChange?.("select");
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        bezierToolRef.current?.cancel();
+        onToolChange?.("select");
+        toast.info("Bezier drawing cancelled");
+      } else if (e.key === "Enter") {
+        const path = bezierToolRef.current?.finish();
+        if (path) {
+          toast.success("Bezier path created! Double-click to edit anchor points.");
+          if (onShapeCreated) onShapeCreated();
+          saveState();
+          onToolChange?.("select");
+        }
+      }
+    };
+
+    canvas.on("mouse:down", handleCanvasClick);
+    window.addEventListener("keydown", handleKeyDown);
+
+    toast.info("Click to add points. Press Enter to finish, Escape to cancel.");
+
+    return () => {
+      canvas.off("mouse:down", handleCanvasClick);
+      window.removeEventListener("keydown", handleKeyDown);
+
+      // Re-enable selection when leaving pen tool
+      canvas.selection = true;
+
+      if (bezierToolRef.current) {
+        const state = bezierToolRef.current.getState();
+        if (state.isDrawing && state.pointCount >= 2) {
+          bezierToolRef.current.finish();
+        } else {
+          bezierToolRef.current.cancel();
+        }
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange, saveState]);
+
+  // Custom Polygon Tool - Click to place vertices
+  useEffect(() => {
+    if (!canvas || activeTool !== "custom-polygon") {
+      // Clean up polygon tool when switching away
+      if (customPolygonToolRef.current) {
+        customPolygonToolRef.current.cancel();
+        customPolygonToolRef.current = null;
+      }
+      return;
+    }
+
+    // Disable selection while using polygon tool
+    canvas.selection = false;
+    canvas.isDrawingMode = false;
+
+    // Initialize custom polygon tool
+    customPolygonToolRef.current = new CustomPolygonTool(canvas, {
+      snap: false,
+      minVertices: 3,
+    });
+
+    customPolygonToolRef.current.start();
+
+    const handleCanvasClick = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+
+      // Check if clicking near first vertex to close
+      if (customPolygonToolRef.current?.isCloseableDistance(pointer.x, pointer.y)) {
+        const polygon = customPolygonToolRef.current.closePolygon();
+        if (polygon) {
+          canvas.add(polygon);
+          canvas.setActiveObject(polygon);
+          toast.success("Polygon created!");
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+
+          // Reset for next polygon
+          customPolygonToolRef.current = new CustomPolygonTool(canvas, {
+            snap: false,
+            minVertices: 3,
+          });
+          customPolygonToolRef.current.start();
+        }
+      } else {
+        customPolygonToolRef.current?.addVertex(pointer.x, pointer.y);
+      }
+    };
+
+    const handleMouseMove = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      customPolygonToolRef.current?.updatePreview(pointer.x, pointer.y);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        customPolygonToolRef.current?.cancel();
+        customPolygonToolRef.current = null;
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const polygon = customPolygonToolRef.current?.closePolygon();
+        if (polygon) {
+          canvas.add(polygon);
+          canvas.setActiveObject(polygon);
+          toast.success("Polygon created!");
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+
+          // Reset for next polygon
+          customPolygonToolRef.current = new CustomPolygonTool(canvas, {
+            snap: false,
+            minVertices: 3,
+          });
+          customPolygonToolRef.current.start();
+        }
+      } else if (e.key === "Backspace") {
+        e.preventDefault();
+        customPolygonToolRef.current?.undoLastVertex();
+      }
+    };
+
+    canvas.on("mouse:down", handleCanvasClick);
+    canvas.on("mouse:move", handleMouseMove);
+    window.addEventListener("keydown", handleKeyDown);
+
+    toast.info("Click to place vertices. Click first vertex or press Enter to close.");
+
+    return () => {
+      canvas.off("mouse:down", handleCanvasClick);
+      canvas.off("mouse:move", handleMouseMove);
+      window.removeEventListener("keydown", handleKeyDown);
+
+      // Re-enable selection when leaving polygon tool
+      canvas.selection = true;
+
+      if (customPolygonToolRef.current) {
+        customPolygonToolRef.current.cancel();
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated]);
+
+  // Straight Line Tool with customizable markers
+  useEffect(() => {
+    if (!canvas || !activeTool.startsWith("straight-line")) {
+      if (straightLineToolRef.current) {
+        straightLineToolRef.current.cancel();
+        straightLineToolRef.current = null;
+      }
+      return;
+    }
+
+    // Parse tool options from activeTool string
+    const options: any = {
+      startMarker: 'none',
+      endMarker: 'none',
+      lineStyle: 'solid',
+      strokeWidth: 2,
+      strokeColor: '#000000',
+      snap: true,
+      gridSize: 20,
+    };
+
+    // Parse activeTool to set markers and styles
+    if (activeTool.includes('double-arrow')) {
+      options.startMarker = 'arrow';
+      options.endMarker = 'arrow';
+    } else if (activeTool.includes('arrow')) {
+      options.endMarker = 'arrow';
+    }
+    
+    if (activeTool.includes('dot')) {
+      options.startMarker = 'dot';
+      options.endMarker = 'dot';
+    }
+    
+    if (activeTool.includes('diamond')) {
+      options.startMarker = 'diamond';
+      options.endMarker = 'diamond';
+    }
+    
+    if (activeTool.includes('circle')) {
+      options.startMarker = 'circle';
+      options.endMarker = 'circle';
+    }
+    
+    if (activeTool.includes('dashed')) {
+      options.lineStyle = 'dashed';
+    } else if (activeTool.includes('dotted')) {
+      options.lineStyle = 'dotted';
+    }
+
+    // Initialize straight line tool
+    straightLineToolRef.current = new StraightLineTool(canvas, options);
+    straightLineToolRef.current.start();
+
+    // Drag-to-draw handlers
+    const handleMouseDown = (e: any) => {
+      e.e?.stopImmediatePropagation?.();
+      e.e?.preventDefault?.();
+      const pointer = canvas.getPointer(e.e);
+      straightLineToolRef.current?.startDragLine(pointer.x, pointer.y);
+    };
+
+    const handleMouseMove = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      straightLineToolRef.current?.updateDragLine(pointer.x, pointer.y);
+    };
+
+    const handleMouseUp = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      const line = straightLineToolRef.current?.finishDragLine(pointer.x, pointer.y);
+      if (line) {
+        toast.success("Straight line created!");
+        if (onShapeCreated) onShapeCreated();
+        // Save state for undo/redo
+        saveState();
+        // Re-initialize tool for drawing more lines
+        straightLineToolRef.current = new StraightLineTool(canvas, options);
+        straightLineToolRef.current.start();
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        straightLineToolRef.current?.cancel();
+        onToolChange?.("select");
+        toast.info("Straight line tool cancelled");
+      }
+    };
+
+    canvas.on("mouse:down", handleMouseDown);
+    canvas.on("mouse:move", handleMouseMove);
+    canvas.on("mouse:up", handleMouseUp);
+    window.addEventListener("keydown", handleKeyDown);
+
+    toast.info("Click and drag to draw a straight line. Press Escape to exit.");
+
+    return () => {
+      canvas.off("mouse:down", handleMouseDown);
+      canvas.off("mouse:move", handleMouseMove);
+      canvas.off("mouse:up", handleMouseUp);
+      window.removeEventListener("keydown", handleKeyDown);
+      if (straightLineToolRef.current) {
+        straightLineToolRef.current.cancel();
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange]);
+
+  // Leader Line Tool
+  useEffect(() => {
+    if (!canvas || activeTool !== "leader-line") {
+      if (leaderLineToolRef.current) {
+        leaderLineToolRef.current.cancel();
+        leaderLineToolRef.current = null;
+      }
+      return;
+    }
+
+    leaderLineToolRef.current = new LeaderLineTool(
+      canvas,
+      undefined,
+      () => onToolChange?.("select"),
+      () => saveState() // Save state for undo/redo when line is created
+    );
+    leaderLineToolRef.current.start();
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        leaderLineToolRef.current?.cancel();
+        leaderLineToolRef.current = null;
+        onToolChange?.("select");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (leaderLineToolRef.current) {
+        leaderLineToolRef.current.cancel();
+        leaderLineToolRef.current = null;
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange]);
+
+  // Bracket Tool
+  useEffect(() => {
+    if (!canvas || activeTool !== "bracket") {
+      if (bracketToolRef.current) {
+        bracketToolRef.current.cancel();
+        bracketToolRef.current = null;
+      }
+      return;
+    }
+
+    bracketToolRef.current = new BracketTool(
+      canvas,
+      undefined,
+      () => onToolChange?.("select"),
+      () => saveState() // Save state for undo/redo when bracket is created
+    );
+    bracketToolRef.current.start();
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        bracketToolRef.current?.cancel();
+        bracketToolRef.current = null;
+        onToolChange?.("select");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (bracketToolRef.current) {
+        bracketToolRef.current.cancel();
+        bracketToolRef.current = null;
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange]);
+
+  // Orthogonal Line Tool with 90-degree bends
+  useEffect(() => {
+    if (!canvas || !activeTool.startsWith("orthogonal-line")) {
+      if (orthogonalLineToolRef.current) {
+        orthogonalLineToolRef.current.cancel();
+        orthogonalLineToolRef.current = null;
+      }
+      return;
+    }
+
+    // Parse tool options from activeTool string
+    const options: any = {
+      startMarker: 'none',
+      endMarker: 'none',
+      lineStyle: 'solid',
+      strokeWidth: 2,
+      strokeColor: '#000000',
+      snap: true,
+      gridSize: 20,
+      smoothCorners: false,
+      cornerRadius: 10,
+    };
+
+    // Parse activeTool to set markers and styles
+    if (activeTool.startsWith('orthogonal-line-custom-')) {
+      // Extract custom markers from tool name
+      // Format: orthogonal-line-custom-{startMarker}-{endMarker}
+      const parts = activeTool.split('-');
+      if (parts.length >= 5) {
+        options.startMarker = parts[3]; // e.g., 'dot', 'arrow', 'none', 'bar'
+        options.endMarker = parts[4];
+      }
+    } else if (activeTool.includes('double-arrow')) {
+      options.startMarker = 'arrow';
+      options.endMarker = 'arrow';
+    } else if (activeTool.includes('arrow')) {
+      options.endMarker = 'arrow';
+    }
+    
+    if (activeTool.includes('dot')) {
+      options.startMarker = 'dot';
+      options.endMarker = 'dot';
+    }
+    
+    if (activeTool.includes('diamond')) {
+      options.startMarker = 'diamond';
+      options.endMarker = 'diamond';
+    }
+    
+    if (activeTool.includes('circle')) {
+      options.startMarker = 'circle';
+      options.endMarker = 'circle';
+    }
+    
+    if (activeTool.includes('dashed')) {
+      options.lineStyle = 'dashed';
+    } else if (activeTool.includes('dotted')) {
+      options.lineStyle = 'dotted';
+    }
+
+    // Initialize orthogonal line tool
+    orthogonalLineToolRef.current = new OrthogonalLineTool(canvas, options);
+    orthogonalLineToolRef.current.start();
+
+    // Click to add waypoints
+    const handleMouseDown = (e: any) => {
+      e.e?.stopImmediatePropagation?.();
+      e.e?.preventDefault?.();
+      const pointer = canvas.getPointer(e.e);
+      orthogonalLineToolRef.current?.addPoint(pointer.x, pointer.y);
+    };
+
+    // Update preview as mouse moves
+    const handleMouseMove = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      orthogonalLineToolRef.current?.updatePreview(pointer.x, pointer.y);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        const line = orthogonalLineToolRef.current?.finish();
+        if (line) {
+          toast.success("Orthogonal line created!");
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+        }
+        onToolChange?.("select");
+      } else if (e.key === "Escape") {
+        orthogonalLineToolRef.current?.cancel();
+        onToolChange?.("select");
+        toast.info("Orthogonal line tool cancelled");
+      }
+    };
+
+    canvas.on("mouse:down", handleMouseDown);
+    canvas.on("mouse:move", handleMouseMove);
+    window.addEventListener("keydown", handleKeyDown);
+
+    toast.info("Click to add waypoints. Press Enter to finish, Escape to cancel.");
+
+    return () => {
+      canvas.off("mouse:down", handleMouseDown);
+      canvas.off("mouse:move", handleMouseMove);
+      window.removeEventListener("keydown", handleKeyDown);
+      if (orthogonalLineToolRef.current) {
+        orthogonalLineToolRef.current.cancel();
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange]);
+
+  // Curved Line Tool with adjustable control points
+  useEffect(() => {
+    if (!canvas || !activeTool.startsWith("curved-line")) {
+      if (curvedLineToolRef.current) {
+        curvedLineToolRef.current.cancel();
+        curvedLineToolRef.current = null;
+      }
+      return;
+    }
+
+    // Parse tool options from activeTool string
+    const options: any = {
+      startMarker: 'none',
+      endMarker: 'none',
+      lineStyle: 'solid',
+      strokeWidth: 2,
+      strokeColor: '#000000',
+      snap: true,
+      gridSize: 20,
+    };
+
+    // Parse activeTool to set markers and styles
+    if (activeTool.startsWith('curved-line-custom-')) {
+      // Extract custom markers from tool name
+      // Format: curved-line-custom-{startMarker}-{endMarker}
+      const parts = activeTool.split('-');
+      if (parts.length >= 5) {
+        options.startMarker = parts[3]; // e.g., 'dot', 'arrow', 'none', 'bar', 'block', 'back-arrow'
+        options.endMarker = parts[4];
+      }
+    } else if (activeTool.includes('double-arrow')) {
+      options.startMarker = 'arrow';
+      options.endMarker = 'arrow';
+    } else if (activeTool.includes('arrow')) {
+      options.endMarker = 'arrow';
+    }
+    
+    if (activeTool.includes('dots')) {
+      options.startMarker = 'dot';
+      options.endMarker = 'dot';
+    }
+    
+    if (activeTool.includes('diamonds')) {
+      options.startMarker = 'diamond';
+      options.endMarker = 'diamond';
+    }
+    
+    if (activeTool.includes('circles')) {
+      options.startMarker = 'circle';
+      options.endMarker = 'circle';
+    }
+    
+    if (activeTool.includes('dashed')) {
+      options.lineStyle = 'dashed';
+    } else if (activeTool.includes('dotted')) {
+      options.lineStyle = 'dotted';
+    }
+
+    // Initialize curved line tool
+    curvedLineToolRef.current = new CurvedLineTool(canvas, options, saveState);
+    curvedLineToolRef.current.start();
+
+    // Two-click drawing handlers
+    let hasStartPoint = false;
+
+    const handleMouseDown = (e: any) => {
+      e.e?.stopImmediatePropagation?.();
+      e.e?.preventDefault?.();
+      const pointer = canvas.getPointer(e.e);
+      if (!hasStartPoint) {
+        curvedLineToolRef.current?.setStartPoint(pointer.x, pointer.y);
+        hasStartPoint = true;
+      } else {
+        const curve = curvedLineToolRef.current?.setEndPoint(pointer.x, pointer.y);
+        if (curve) {
+          toast.success("Curved line created! Drag the control point to adjust.");
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+          // Re-initialize for next line
+          curvedLineToolRef.current = new CurvedLineTool(canvas, options, saveState);
+          curvedLineToolRef.current.start();
+          hasStartPoint = false;
+        }
+      }
+    };
+
+    const handleMouseMove = (e: any) => {
+      if (hasStartPoint) {
+        const pointer = canvas.getPointer(e.e);
+        curvedLineToolRef.current?.updatePreview(pointer.x, pointer.y);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        curvedLineToolRef.current?.cancel();
+        onToolChange?.("select");
+        hasStartPoint = false;
+        toast.info("Curved line tool cancelled");
+      }
+    };
+
+    canvas.on("mouse:down", handleMouseDown);
+    canvas.on("mouse:move", handleMouseMove);
+    window.addEventListener("keydown", handleKeyDown);
+
+    toast.info("Click start point, then end point. Drag control point to adjust curve.");
+
+    return () => {
+      canvas.off("mouse:down", handleMouseDown);
+      canvas.off("mouse:move", handleMouseMove);
+      window.removeEventListener("keydown", handleKeyDown);
+      if (curvedLineToolRef.current) {
+        curvedLineToolRef.current.cancel();
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange]);
+
+  // Membrane Brush Tool Handler
+  useEffect(() => {
+    if (!canvas || !activeTool.startsWith("membrane-brush")) {
+      if (membraneBrushToolRef.current) {
+        membraneBrushToolRef.current.cancel();
+        membraneBrushToolRef.current = null;
+      }
+      return;
+    }
+
+    // Parse membrane brush options from activeTool string
+    // Format: membrane-brush:{JSON options}
+    const optionsStr = activeTool.replace('membrane-brush:', '');
+    let options: any;
+    
+    try {
+      options = JSON.parse(optionsStr);
+    } catch (error) {
+      console.error("Failed to parse membrane brush options:", error);
+      toast.error("Failed to initialize membrane brush");
+      onToolChange?.("select");
+      return;
+    }
+
+    if (!options.iconSVG) {
+      toast.error("No icon selected for membrane brush");
+      onToolChange?.("select");
+      return;
+    }
+
+    // Initialize membrane brush tool
+    membraneBrushToolRef.current = new MembraneBrushTool(canvas, options);
+    membraneBrushToolRef.current.start();
+
+    let isDrawing = false;
+
+    const handleMouseDown = (e: any) => {
+      e.e?.stopImmediatePropagation?.();
+      e.e?.preventDefault?.();
+      const pointer = canvas.getPointer(e.e);
+      membraneBrushToolRef.current?.addPoint(pointer.x, pointer.y);
+      isDrawing = true;
+    };
+
+    const handleMouseMove = (e: any) => {
+      if (isDrawing) {
+        const pointer = canvas.getPointer(e.e);
+        membraneBrushToolRef.current?.addPoint(pointer.x, pointer.y);
+        membraneBrushToolRef.current?.updatePreview();
+      }
+    };
+
+    const handleMouseUp = async () => {
+      if (isDrawing) {
+        const membrane = await membraneBrushToolRef.current?.finish();
+        if (membrane) {
+          toast.success("Membrane created! You can continue drawing or press ESC to exit.");
+          if (onShapeCreated) onShapeCreated();
+          // Re-initialize for next membrane
+          membraneBrushToolRef.current = new MembraneBrushTool(canvas, options);
+          membraneBrushToolRef.current.start();
+        }
+        isDrawing = false;
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        membraneBrushToolRef.current?.cancel();
+        onToolChange?.("select");
+        isDrawing = false;
+        toast.info("Membrane brush tool cancelled");
+      }
+    };
+
+    canvas.on("mouse:down", handleMouseDown);
+    canvas.on("mouse:move", handleMouseMove);
+    canvas.on("mouse:up", handleMouseUp);
+    window.addEventListener("keydown", handleKeyDown);
+
+    toast.info("Click and drag to draw a membrane. Release to finish. Press ESC to exit.");
+
+    return () => {
+      canvas.off("mouse:down", handleMouseDown);
+      canvas.off("mouse:move", handleMouseMove);
+      canvas.off("mouse:up", handleMouseUp);
+      window.removeEventListener("keydown", handleKeyDown);
+      if (membraneBrushToolRef.current) {
+        membraneBrushToolRef.current.cancel();
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange]);
+
+  // Preload default membrane icon SVG when settings change
+  useEffect(() => {
+    const FALLBACK_MEMBRANE_ICON = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="20" r="15" fill="#3b82f6"/><circle cx="50" cy="80" r="15" fill="#3b82f6"/><line x1="50" y1="35" x2="50" y2="65" stroke="#1e40af" stroke-width="3"/></svg>`;
+
+    const preloadDefaultIcon = async () => {
+      try {
+        let iconData = null;
+
+        // Method 1: Try using the icon ID from settings
+        if (membraneSettings?.default_icon_id) {
+          const { data, error } = await supabase
+            .from('icons')
+            .select('id, name, svg_content')
+            .eq('id', membraneSettings.default_icon_id)
+            .single();
+
+          if (!error && data?.svg_content) {
+            iconData = data;
+          }
+        }
+
+        // Method 2: If no icon from settings, query for the default membrane icon directly
+        if (!iconData) {
+          const { data, error } = await supabase
+            .from('icons')
+            .select('id, name, svg_content')
+            .eq('is_default_membrane_icon', true)
+            .eq('is_membrane_icon', true)
+            .maybeSingle();
+
+          if (!error && data?.svg_content) {
+            iconData = data;
+          }
+        }
+
+        // Store the icon SVG or fallback
+        defaultMembraneIconSVGRef.current = iconData?.svg_content || FALLBACK_MEMBRANE_ICON;
+      } catch (error) {
+        console.error('Error preloading default membrane icon:', error);
+        defaultMembraneIconSVGRef.current = FALLBACK_MEMBRANE_ICON;
+      }
+    };
+
+    preloadDefaultIcon();
+  }, [membraneSettings]);
+
+  // Membrane Path Tool Handler - Click-based membrane creation
+  useEffect(() => {
+    if (!canvas || activeTool !== "membrane-path") {
+      if (membranePathToolRef.current) {
+        membranePathToolRef.current.cancel();
+        membranePathToolRef.current = null;
+      }
+      return;
+    }
+
+    // Initialize membrane tool with settings from admin panel
+    const initializeMembraneTool = () => {
+      // Fallback icon if not preloaded yet
+      const FALLBACK_MEMBRANE_ICON = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="20" r="15" fill="#3b82f6"/><circle cx="50" cy="80" r="15" fill="#3b82f6"/><line x1="50" y1="35" x2="50" y2="65" stroke="#1e40af" stroke-width="3"/></svg>`;
+
+      // Use preloaded icon or fallback
+      const iconSVG = defaultMembraneIconSVGRef.current || FALLBACK_MEMBRANE_ICON;
+
+      const defaultOptions = {
+        iconSVG,
+        iconSize: membraneSettings?.default_icon_size ?? 40,
+        spacing: membraneSettings?.default_spacing ?? 0,
+        rotateToPath: membraneSettings?.default_rotate_to_path ?? true,
+        doubleSided: membraneSettings?.default_double_sided ?? false,
+        orientationOffset: membraneSettings?.default_orientation_offset ?? 0,
+      };
+
+      membranePathToolRef.current = new MembranePathTool(canvas, defaultOptions);
+      membranePathToolRef.current.start();
+
+      toast.info("Click to place points. Click first point to close. Press Enter to finish.");
+    };
+
+    const handleCanvasClick = async (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      const membrane = await membranePathToolRef.current?.addPoint(pointer.x, pointer.y);
+
+      // If membrane was created (path auto-closed), switch to select tool
+      if (membrane) {
+        toast.success("Membrane shape created!");
+        if (onShapeCreated) onShapeCreated();
+        saveState();
+        onToolChange?.("select");
+      }
+    };
+
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        membranePathToolRef.current?.cancel();
+        onToolChange?.("select");
+        toast.info("Membrane path cancelled");
+      } else if (e.key === "Enter") {
+        const membrane = await membranePathToolRef.current?.finish();
+        if (membrane) {
+          toast.success("Membrane shape created!");
+          if (onShapeCreated) onShapeCreated();
+          saveState();
+          onToolChange?.("select");
+        }
+      }
+    };
+
+    canvas.on("mouse:down", handleCanvasClick);
+    window.addEventListener("keydown", handleKeyDown);
+
+    initializeMembraneTool();
+
+    return () => {
+      canvas.off("mouse:down", handleCanvasClick);
+      window.removeEventListener("keydown", handleKeyDown);
+      if (membranePathToolRef.current) {
+        membranePathToolRef.current.cancel();
+      }
+    };
+  }, [canvas, activeTool, onShapeCreated, onToolChange, saveState, membraneSettings]);
+
+  // Chart Tool Handler - Click-based chart insertion
+  useEffect(() => {
+    if (!canvas || activeTool !== "chart") return;
+
+
+    const handleCanvasClick = async (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+
+      try {
+        const chartGroup = await ChartTool.createPlaceholderChart(pointer.x, pointer.y);
+        canvas.add(chartGroup);
+        canvas.setActiveObject(chartGroup);
+        canvas.renderAll();
+        saveState();
+        onToolChange?.("select");
+        toast.success("Chart added! Configure it in the Properties Panel.");
+      } catch (error) {
+        console.error("Error creating chart:", error);
+        toast.error("Failed to create chart");
+      }
+    };
+
+    canvas.on("mouse:down", handleCanvasClick);
+
+    return () => {
+      canvas.off("mouse:down", handleCanvasClick);
+    };
+  }, [canvas, activeTool, onToolChange, saveState]);
+
+  // Handle tool changes
+  useEffect(() => {
+    if (!canvas) return;
+
+    // Update cursor based on tool
+    if (activeTool === "text") {
+      canvas.defaultCursor = "text";
+      canvas.hoverCursor = "text";
+    } else if (activeTool === "freeform-line") {
+      canvas.defaultCursor = "crosshair";
+      canvas.hoverCursor = "crosshair";
+    } else if (activeTool === "pen") {
+      canvas.defaultCursor = "crosshair";
+      canvas.hoverCursor = "crosshair";
+    } else if (activeTool === "eraser") {
+      canvas.defaultCursor = "crosshair";
+      canvas.hoverCursor = "crosshair";
+    } else if (activeTool.startsWith('connector-') || activeTool.startsWith('line-') || activeTool.startsWith('straight-line') || activeTool.startsWith('orthogonal-line') || activeTool.startsWith('curved-line') || activeTool.startsWith('membrane-brush') || activeTool === 'membrane-path' || activeTool === 'chart' || activeTool === 'leader-line' || activeTool === 'bracket') {
+      canvas.defaultCursor = "crosshair";
+      canvas.hoverCursor = "crosshair";
+    } else {
+      canvas.defaultCursor = "default";
+      canvas.hoverCursor = "move";
+    }
+
+    const handleCanvasClick = (e: any) => {
+      if (activeTool === "select" || activeTool === "freeform-line" || activeTool === "pen" || activeTool === "eraser" || activeTool === "image" || activeTool.startsWith('straight-line') || activeTool.startsWith('orthogonal-line') || activeTool.startsWith('curved-line') || activeTool.startsWith('membrane-brush') || activeTool === 'membrane-path' || activeTool === 'chart' || activeTool === 'leader-line' || activeTool === 'bracket') return;
+
+      const pointer = canvas.getPointer(e.e);
+      
+      // Handle shapes with text
+      if (activeTool.endsWith('-with-text')) {
+        let bgShape;
+        let textWidth = 100;
+        
+        switch (activeTool) {
+          case "circle-with-text": {
+            bgShape = new Circle({
+              radius: 60,
+              fill: DEFAULT_SHAPE_FILL,
+              stroke: DEFAULT_SHAPE_STROKE,
+              strokeWidth: 2,
+              strokeUniform: true,
+              originX: 'center',
+              originY: 'center',
+            });
+            textWidth = 100;
+            break;
+          }
+          
+          case "rectangle-with-text": {
+            bgShape = new Rect({
+              width: 120,
+              height: 80,
+              fill: DEFAULT_SHAPE_FILL,
+              stroke: DEFAULT_SHAPE_STROKE,
+              strokeWidth: 2,
+              strokeUniform: true,
+              originX: 'center',
+              originY: 'center',
+            });
+            textWidth = 100;
+            break;
+          }
+          
+          case "rounded-rect-with-text": {
+            bgShape = new Rect({
+              width: 120,
+              height: 80,
+              rx: 10,
+              ry: 10,
+              fill: DEFAULT_SHAPE_FILL,
+              stroke: DEFAULT_SHAPE_STROKE,
+              strokeWidth: 2,
+              strokeUniform: true,
+              originX: 'center',
+              originY: 'center',
+            });
+            textWidth = 100;
+            break;
+          }
+          
+          case "square-with-text": {
+            bgShape = new Rect({
+              width: 100,
+              height: 100,
+              fill: DEFAULT_SHAPE_FILL,
+              stroke: DEFAULT_SHAPE_STROKE,
+              strokeWidth: 2,
+              strokeUniform: true,
+              originX: 'center',
+              originY: 'center',
+            });
+            textWidth = 80;
+            break;
+          }
+        }
+        
+        if (bgShape) {
+          const shapeText = new Textbox("Text", {
+            fontSize: 18,
+            fill: "#ffffff",
+            textAlign: "center",
+            originX: 'center',
+            originY: 'center',
+            width: textWidth,
+            fontFamily: getCanvasFontFamily(textFont),
+            selectable: true,
+            evented: true,
+            hoverCursor: 'text',
+          });
+          (shapeText as any).listType = 'none';
+          
+          const group = new Group([bgShape, shapeText], {
+            left: pointer.x,
+            top: pointer.y,
+            originX: 'center',
+            originY: 'center',
+            subTargetCheck: true,
+          });
+          
+          canvas.add(group);
+          canvas.setActiveObject(group);
+          canvas.requestRenderAll();
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+          toast.success("Shape with text created! Double-click to edit text.");
+        }
+        return;
+      }
+
+      // Handle connector tools
+      if (activeTool.startsWith('connector-') || activeTool.startsWith('line-')) {
+        if (!connectorState.isDrawing) {
+          // Start drawing
+          setConnectorState({
+            isDrawing: true,
+            startX: pointer.x,
+            startY: pointer.y,
+          });
+          toast.info("Click to set end point");
+          return;
+        } else {
+          // Finish drawing
+          const getConnectorProps = () => {
+            let startMarker: ArrowMarkerType = 'none';
+            let endMarker: ArrowMarkerType = 'arrow';
+            let routingStyle: RoutingStyle = 'straight';
+
+            if (activeTool === 'connector-curved') routingStyle = 'curved';
+            else if (activeTool === 'connector-orthogonal') routingStyle = 'orthogonal';
+            else if (activeTool === 'line-double-arrow') startMarker = 'arrow';
+            else if (activeTool === 'line-plain') endMarker = 'none';
+            else if (activeTool === 'line-circle-arrow') startMarker = 'circle';
+            else if (activeTool === 'line-diamond') {
+              startMarker = 'diamond';
+              endMarker = 'none';
+            }
+
+            return { startMarker, endMarker, routingStyle };
+          };
+
+          const props = getConnectorProps();
+          createConnector(canvas, {
+            startX: connectorState.startX!,
+            startY: connectorState.startY!,
+            endX: pointer.x,
+            endY: pointer.y,
+            ...props,
+            strokeColor: '#000000',
+            strokeWidth: 2,
+          });
+
+          setConnectorState({
+            isDrawing: false,
+            startX: null,
+            startY: null,
+          });
+
+          canvas.requestRenderAll();
+          if (onShapeCreated) onShapeCreated();
+          // Save state for undo/redo
+          saveState();
+          toast.success("Connector created!");
+          return;
+        }
+      }
+
+      // Numbered Callout - single click placement
+      if (activeTool === "numbered-callout") {
+        const number = getNextCalloutNumber(canvas);
+        const callout = createNumberedCallout({
+          number,
+          left: pointer.x - 15,
+          top: pointer.y - 15,
+        });
+        canvas.add(callout);
+        registerCallout(canvas, callout);
+        createOrUpdateLegend(canvas);
+        if (onShapeCreated) onShapeCreated();
+        // Save state for undo/redo
+        saveState();
+        toast.success(`Callout ${number} added`);
+        return;
+      }
+
+      if (activeTool === "text") {
+        const textDecoration = [];
+        if (textUnderline) textDecoration.push('underline');
+        if (textOverline) textDecoration.push('overline');
+        
+        const text = new Textbox("Type here", {
+          left: pointer.x,
+          top: pointer.y,
+          width: 200,
+          fontSize: 24,
+          fontFamily: getCanvasFontFamily(textFont),
+          textAlign: textAlign as any,
+          underline: textUnderline,
+          overline: textOverline,
+          fontWeight: textBold ? 'bold' : 'normal',
+          fontStyle: textItalic ? 'italic' : 'normal',
+          fill: "#000000",
+        });
+        (text as any).listType = 'none';
+        canvas.add(text);
+        canvas.setActiveObject(text);
+        // Immediately enter editing so user can type
+        if ((text as any).enterEditing) {
+          (text as any).enterEditing();
+          if ((text as any).selectAll) {
+            (text as any).selectAll();
+          }
+        }
+        canvas.requestRenderAll();
+        if (onShapeCreated) onShapeCreated();
+        // Save state for undo/redo
+        saveState();
+        return;
+      }
+      
+      switch (activeTool) {
+        case "rectangle":
+        case "square":
+          const rect = new Rect({
+            left: pointer.x - 50,
+            top: pointer.y - 50,
+            width: activeTool === "square" ? 100 : 120,
+            height: 100,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(rect);
+          canvas.setActiveObject(rect);
+          break;
+
+        case "rounded-rect":
+          const roundedRect = new Rect({
+            left: pointer.x - 60,
+            top: pointer.y - 40,
+            width: 120,
+            height: 80,
+            rx: 10,
+            ry: 10,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(roundedRect);
+          canvas.setActiveObject(roundedRect);
+          break;
+          
+        case "circle":
+        case "ellipse":
+          const circle = new Circle({
+            left: pointer.x - 50,
+            top: pointer.y - 50,
+            radius: 50,
+            scaleX: activeTool === "ellipse" ? 1.4 : 1,
+            scaleY: 1,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(circle);
+          canvas.setActiveObject(circle);
+          break;
+
+        case "rhombus":
+          const rhombus = new Polygon([
+            { x: pointer.x, y: pointer.y - 50 },
+            { x: pointer.x + 50, y: pointer.y },
+            { x: pointer.x, y: pointer.y + 50 },
+            { x: pointer.x - 50, y: pointer.y },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(rhombus);
+          canvas.setActiveObject(rhombus);
+          break;
+
+        case "parallelogram":
+          const parallelogram = new Polygon([
+            { x: pointer.x - 40, y: pointer.y - 40 },
+            { x: pointer.x + 60, y: pointer.y - 40 },
+            { x: pointer.x + 40, y: pointer.y + 40 },
+            { x: pointer.x - 60, y: pointer.y + 40 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(parallelogram);
+          canvas.setActiveObject(parallelogram);
+          break;
+
+        case "trapezoid":
+          const trapezoid = new Polygon([
+            { x: pointer.x - 30, y: pointer.y - 40 },
+            { x: pointer.x + 30, y: pointer.y - 40 },
+            { x: pointer.x + 50, y: pointer.y + 40 },
+            { x: pointer.x - 50, y: pointer.y + 40 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(trapezoid);
+          canvas.setActiveObject(trapezoid);
+          break;
+
+        case "pentagon":
+          const pentagonPoints = [];
+          for (let i = 0; i < 5; i++) {
+            const angle = (i * 2 * Math.PI) / 5 - Math.PI / 2;
+            pentagonPoints.push({
+              x: pointer.x + 50 * Math.cos(angle),
+              y: pointer.y + 50 * Math.sin(angle),
+            });
+          }
+          const pentagon = new Polygon(pentagonPoints, {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(pentagon);
+          canvas.setActiveObject(pentagon);
+          break;
+
+        case "hexagon":
+          const hexagonPoints = [];
+          for (let i = 0; i < 6; i++) {
+            const angle = (i * 2 * Math.PI) / 6;
+            hexagonPoints.push({
+              x: pointer.x + 50 * Math.cos(angle),
+              y: pointer.y + 50 * Math.sin(angle),
+            });
+          }
+          const hexagon = new Polygon(hexagonPoints, {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(hexagon);
+          canvas.setActiveObject(hexagon);
+          break;
+
+        case "octagon":
+          const octagonPoints = [];
+          for (let i = 0; i < 8; i++) {
+            const angle = (i * 2 * Math.PI) / 8;
+            octagonPoints.push({
+              x: pointer.x + 50 * Math.cos(angle),
+              y: pointer.y + 50 * Math.sin(angle),
+            });
+          }
+          const octagon = new Polygon(octagonPoints, {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(octagon);
+          canvas.setActiveObject(octagon);
+          break;
+          
+        case "zoom-callout-dotted": {
+          // Create small circle (source/highlight area)
+          const circle = new Circle({
+            left: pointer.x - 20,
+            top: pointer.y - 20,
+            radius: 20,
+            fill: 'transparent',
+            stroke: '#000000',
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+
+          // Create rectangle (detail/magnified area)
+          const rect = new Rect({
+            left: pointer.x + 80,
+            top: pointer.y - 60,
+            width: 160,
+            height: 120,
+            fill: 'transparent',
+            stroke: '#000000',
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+
+          // Calculate connection points - simple straight lines
+          const circleRight = pointer.x + 20;
+          const circleTopY = pointer.y - 14;
+          const circleBottomY = pointer.y + 14;
+
+          const rectLeft = pointer.x + 80;
+          const rectTopY = pointer.y - 60;
+          const rectBottomY = pointer.y + 60;
+
+          // Create simple dotted connector lines (straight from circle to rectangle)
+          const line1 = new Line(
+            [circleRight, circleTopY, rectLeft, rectTopY],
+            {
+              stroke: '#000000',
+              strokeWidth: 1.5,
+              strokeDashArray: [6, 6],
+              strokeUniform: true,
+              selectable: false,
+              evented: false,
+            }
+          );
+
+          const line2 = new Line(
+            [circleRight, circleBottomY, rectLeft, rectBottomY],
+            {
+              stroke: '#000000',
+              strokeWidth: 1.5,
+              strokeDashArray: [6, 6],
+              strokeUniform: true,
+              selectable: false,
+              evented: false,
+            }
+          );
+
+          // Group all elements together
+          const calloutGroup = new Group([circle, line1, line2, rect], {
+            left: pointer.x - 20,
+            top: pointer.y - 60,
+            selectable: true,
+          });
+
+          canvas.add(calloutGroup);
+          canvas.setActiveObject(calloutGroup);
+          break;
+        }
+
+        case "zoom-callout-trapezoid": {
+          // Create small circle (source/highlight area)
+          const circle = new Circle({
+            left: pointer.x - 20,
+            top: pointer.y - 20,
+            radius: 20,
+            fill: 'transparent',
+            stroke: '#000000',
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+
+          // Create convergence square (the funnel point)
+          const convergenceX = pointer.x + 50;
+          const convergenceY = pointer.y;
+          const convergenceSize = 8;
+          
+          const convergenceSquare = new Rect({
+            left: convergenceX - convergenceSize / 2,
+            top: convergenceY - convergenceSize / 2,
+            width: convergenceSize,
+            height: convergenceSize,
+            fill: 'transparent',
+            stroke: '#000000',
+            strokeWidth: 1,
+            strokeUniform: true,
+          });
+
+          // Create rectangle (detail/magnified area)
+          const rect = new Rect({
+            left: pointer.x + 100,
+            top: pointer.y - 80,
+            width: 180,
+            height: 160,
+            fill: 'transparent',
+            stroke: '#000000',
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+
+          // Calculate connection points for funnel effect
+          const circleRight = pointer.x + 20;
+          const circleTopY = pointer.y - 14;
+          const circleBottomY = pointer.y + 14;
+
+          const convergenceTop = convergenceY - convergenceSize / 2;
+          const convergenceBottom = convergenceY + convergenceSize / 2;
+
+          const rectLeft = pointer.x + 100;
+          const rectTopY = pointer.y - 80;
+          const rectBottomY = pointer.y + 80;
+
+          // Create 4 dotted lines for trapezoid funnel effect
+          // Lines from circle to convergence square (narrowing)
+          const line1 = new Line(
+            [circleRight, circleTopY, convergenceX - convergenceSize / 2, convergenceTop],
+            {
+              stroke: '#000000',
+              strokeWidth: 1.5,
+              strokeDashArray: [6, 6],
+              strokeUniform: true,
+              selectable: false,
+              evented: false,
+            }
+          );
+
+          const line2 = new Line(
+            [circleRight, circleBottomY, convergenceX - convergenceSize / 2, convergenceBottom],
+            {
+              stroke: '#000000',
+              strokeWidth: 1.5,
+              strokeDashArray: [6, 6],
+              strokeUniform: true,
+              selectable: false,
+              evented: false,
+            }
+          );
+
+          // Lines from convergence square to rectangle (widening)
+          const line3 = new Line(
+            [convergenceX + convergenceSize / 2, convergenceTop, rectLeft, rectTopY],
+            {
+              stroke: '#000000',
+              strokeWidth: 1.5,
+              strokeDashArray: [6, 6],
+              strokeUniform: true,
+              selectable: false,
+              evented: false,
+            }
+          );
+
+          const line4 = new Line(
+            [convergenceX + convergenceSize / 2, convergenceBottom, rectLeft, rectBottomY],
+            {
+              stroke: '#000000',
+              strokeWidth: 1.5,
+              strokeDashArray: [6, 6],
+              strokeUniform: true,
+              selectable: false,
+              evented: false,
+            }
+          );
+
+          // Group all elements together
+          const calloutGroup = new Group([circle, line1, line2, convergenceSquare, line3, line4, rect], {
+            left: pointer.x - 20,
+            top: pointer.y - 80,
+            selectable: true,
+          });
+
+          canvas.add(calloutGroup);
+          canvas.setActiveObject(calloutGroup);
+          break;
+        }
+        
+        case "star":
+          const starPoints = [];
+          const outerRadius = 50;
+          const innerRadius = 25;
+          for (let i = 0; i < 10; i++) {
+            const radius = i % 2 === 0 ? outerRadius : innerRadius;
+            const angle = (i * Math.PI) / 5 - Math.PI / 2;
+            starPoints.push({
+              x: pointer.x + radius * Math.cos(angle),
+              y: pointer.y + radius * Math.sin(angle),
+            });
+          }
+          const star = new Polygon(starPoints, {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(star);
+          canvas.setActiveObject(star);
+          break;
+
+        case "triangle":
+        case "right-triangle":
+          const trianglePoints = activeTool === "right-triangle"
+            ? [
+                { x: pointer.x - 50, y: pointer.y - 50 },
+                { x: pointer.x + 50, y: pointer.y + 50 },
+                { x: pointer.x - 50, y: pointer.y + 50 },
+              ]
+            : [
+                { x: pointer.x, y: pointer.y - 50 },
+                { x: pointer.x + 50, y: pointer.y + 50 },
+                { x: pointer.x - 50, y: pointer.y + 50 },
+              ];
+          const triangle = new Polygon(trianglePoints, {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(triangle);
+          canvas.setActiveObject(triangle);
+          break;
+
+        case "arrow-right":
+          const arrow = new Polygon([
+            { x: pointer.x - 50, y: pointer.y - 15 },
+            { x: pointer.x + 30, y: pointer.y - 15 },
+            { x: pointer.x + 30, y: pointer.y - 25 },
+            { x: pointer.x + 50, y: pointer.y },
+            { x: pointer.x + 30, y: pointer.y + 25 },
+            { x: pointer.x + 30, y: pointer.y + 15 },
+            { x: pointer.x - 50, y: pointer.y + 15 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(arrow);
+          canvas.setActiveObject(arrow);
+          break;
+
+        case "arrow-left":
+          const arrowLeft = new Polygon([
+            { x: pointer.x + 50, y: pointer.y - 15 },
+            { x: pointer.x - 30, y: pointer.y - 15 },
+            { x: pointer.x - 30, y: pointer.y - 25 },
+            { x: pointer.x - 50, y: pointer.y },
+            { x: pointer.x - 30, y: pointer.y + 25 },
+            { x: pointer.x - 30, y: pointer.y + 15 },
+            { x: pointer.x + 50, y: pointer.y + 15 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(arrowLeft);
+          canvas.setActiveObject(arrowLeft);
+          break;
+
+        case "arrow-up":
+          const arrowUp = new Polygon([
+            { x: pointer.x - 15, y: pointer.y + 50 },
+            { x: pointer.x - 15, y: pointer.y - 30 },
+            { x: pointer.x - 25, y: pointer.y - 30 },
+            { x: pointer.x, y: pointer.y - 50 },
+            { x: pointer.x + 25, y: pointer.y - 30 },
+            { x: pointer.x + 15, y: pointer.y - 30 },
+            { x: pointer.x + 15, y: pointer.y + 50 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(arrowUp);
+          canvas.setActiveObject(arrowUp);
+          break;
+
+        case "arrow-down":
+          const arrowDown = new Polygon([
+            { x: pointer.x - 15, y: pointer.y - 50 },
+            { x: pointer.x - 15, y: pointer.y + 30 },
+            { x: pointer.x - 25, y: pointer.y + 30 },
+            { x: pointer.x, y: pointer.y + 50 },
+            { x: pointer.x + 25, y: pointer.y + 30 },
+            { x: pointer.x + 15, y: pointer.y + 30 },
+            { x: pointer.x + 15, y: pointer.y - 50 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(arrowDown);
+          canvas.setActiveObject(arrowDown);
+          break;
+
+        case "arrow-double-h":
+          const doubleArrowH = new Polygon([
+            { x: pointer.x - 50, y: pointer.y },
+            { x: pointer.x - 30, y: pointer.y - 20 },
+            { x: pointer.x - 30, y: pointer.y - 10 },
+            { x: pointer.x + 30, y: pointer.y - 10 },
+            { x: pointer.x + 30, y: pointer.y - 20 },
+            { x: pointer.x + 50, y: pointer.y },
+            { x: pointer.x + 30, y: pointer.y + 20 },
+            { x: pointer.x + 30, y: pointer.y + 10 },
+            { x: pointer.x - 30, y: pointer.y + 10 },
+            { x: pointer.x - 30, y: pointer.y + 20 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(doubleArrowH);
+          canvas.setActiveObject(doubleArrowH);
+          break;
+
+        case "arrow-thick":
+          const thickArrow = new Polygon([
+            { x: pointer.x - 50, y: pointer.y - 20 },
+            { x: pointer.x + 20, y: pointer.y - 20 },
+            { x: pointer.x + 20, y: pointer.y - 35 },
+            { x: pointer.x + 50, y: pointer.y },
+            { x: pointer.x + 20, y: pointer.y + 35 },
+            { x: pointer.x + 20, y: pointer.y + 20 },
+            { x: pointer.x - 50, y: pointer.y + 20 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(thickArrow);
+          canvas.setActiveObject(thickArrow);
+          break;
+
+        case "process":
+          const process = new Rect({
+            left: pointer.x - 60,
+            top: pointer.y - 40,
+            width: 120,
+            height: 80,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(process);
+          canvas.setActiveObject(process);
+          break;
+
+        case "decision":
+          const decision = new Polygon([
+            { x: pointer.x, y: pointer.y - 50 },
+            { x: pointer.x + 50, y: pointer.y },
+            { x: pointer.x, y: pointer.y + 50 },
+            { x: pointer.x - 50, y: pointer.y },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(decision);
+          canvas.setActiveObject(decision);
+          break;
+
+        case "data":
+          const data = new Polygon([
+            { x: pointer.x - 40, y: pointer.y - 40 },
+            { x: pointer.x + 50, y: pointer.y - 40 },
+            { x: pointer.x + 40, y: pointer.y + 40 },
+            { x: pointer.x - 50, y: pointer.y + 40 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(data);
+          canvas.setActiveObject(data);
+          break;
+
+        case "terminator":
+          const terminator = new Rect({
+            left: pointer.x - 60,
+            top: pointer.y - 30,
+            width: 120,
+            height: 60,
+            rx: 30,
+            ry: 30,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(terminator);
+          canvas.setActiveObject(terminator);
+          break;
+
+        case "document":
+          const documentShape = new Polygon([
+            { x: pointer.x - 40, y: pointer.y - 50 },
+            { x: pointer.x + 40, y: pointer.y - 50 },
+            { x: pointer.x + 50, y: pointer.y - 40 },
+            { x: pointer.x + 50, y: pointer.y + 50 },
+            { x: pointer.x - 50, y: pointer.y + 50 },
+          ], {
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(documentShape);
+          canvas.setActiveObject(documentShape);
+          break;
+
+        case "database":
+          // Database with cylinder shape - use stacked ellipses
+          const dbTop = new Ellipse({
+            left: pointer.x - 40,
+            top: pointer.y - 40,
+            rx: 40,
+            ry: 10,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          const dbBody = new Rect({
+            left: pointer.x - 40,
+            top: pointer.y - 30,
+            width: 80,
+            height: 70,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(dbBody, dbTop);
+          canvas.setActiveObject(dbTop);
+          break;
+
+        case "callout":
+        case "cloud":
+        case "heart":
+        case "cross":
+          // For complex paths, use simple geometric approximations
+          const simpleShape = new Rect({
+            left: pointer.x - 50,
+            top: pointer.y - 50,
+            width: 100,
+            height: 100,
+            fill: DEFAULT_SHAPE_FILL,
+            stroke: DEFAULT_SHAPE_STROKE,
+            strokeWidth: 2,
+            strokeUniform: true,
+          });
+          canvas.add(simpleShape);
+          canvas.setActiveObject(simpleShape);
+          break;
+          
+        case "line":
+          const line = new Line([pointer.x, pointer.y, pointer.x + 100, pointer.y], {
+            stroke: "#000000",
+            strokeWidth: 2,
+          });
+          canvas.add(line);
+          canvas.setActiveObject(line);
+          break;
+
+        case "line-arrow-right": {
+          const lineArrowRight = new Line([pointer.x, pointer.y, pointer.x + 100, pointer.y], {
+            stroke: "#000000",
+            strokeWidth: 2,
+          });
+          const arrowHeadRight = new Polygon([
+            { x: pointer.x + 100, y: pointer.y },
+            { x: pointer.x + 90, y: pointer.y - 6 },
+            { x: pointer.x + 90, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const groupArrowRight = new Group([lineArrowRight, arrowHeadRight], {
+            selectable: true,
+          });
+          canvas.add(groupArrowRight);
+          canvas.setActiveObject(groupArrowRight);
+          break;
+        }
+
+        case "line-arrow-left": {
+          const lineArrowLeft = new Line([pointer.x, pointer.y, pointer.x + 100, pointer.y], {
+            stroke: "#000000",
+            strokeWidth: 2,
+          });
+          const arrowHeadLeft = new Polygon([
+            { x: pointer.x, y: pointer.y },
+            { x: pointer.x + 10, y: pointer.y - 6 },
+            { x: pointer.x + 10, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const groupArrowLeft = new Group([lineArrowLeft, arrowHeadLeft], {
+            selectable: true,
+          });
+          canvas.add(groupArrowLeft);
+          canvas.setActiveObject(groupArrowLeft);
+          break;
+        }
+
+        case "line-arrow-both": {
+          const lineArrowBoth = new Line([pointer.x, pointer.y, pointer.x + 100, pointer.y], {
+            stroke: "#000000",
+            strokeWidth: 2,
+          });
+          const arrowHeadBothLeft = new Polygon([
+            { x: pointer.x, y: pointer.y },
+            { x: pointer.x + 10, y: pointer.y - 6 },
+            { x: pointer.x + 10, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHeadBothRight = new Polygon([
+            { x: pointer.x + 100, y: pointer.y },
+            { x: pointer.x + 90, y: pointer.y - 6 },
+            { x: pointer.x + 90, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const groupArrowBoth = new Group([lineArrowBoth, arrowHeadBothLeft, arrowHeadBothRight], {
+            selectable: true,
+          });
+          canvas.add(groupArrowBoth);
+          canvas.setActiveObject(groupArrowBoth);
+          break;
+        }
+
+        case "dashed-line": {
+          const dashedLine = new Line([pointer.x, pointer.y, pointer.x + 100, pointer.y], {
+            stroke: "#000000",
+            strokeWidth: 2,
+            strokeDashArray: [5, 5],
+          });
+          canvas.add(dashedLine);
+          canvas.setActiveObject(dashedLine);
+          break;
+        }
+
+        case "dashed-line-arrow": {
+          const dashedLineArrow = new Line([pointer.x, pointer.y, pointer.x + 100, pointer.y], {
+            stroke: "#000000",
+            strokeWidth: 2,
+            strokeDashArray: [5, 5],
+          });
+          const dashedArrowHead = new Polygon([
+            { x: pointer.x + 100, y: pointer.y },
+            { x: pointer.x + 90, y: pointer.y - 6 },
+            { x: pointer.x + 90, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const groupDashedArrow = new Group([dashedLineArrow, dashedArrowHead], {
+            selectable: true,
+          });
+          canvas.add(groupDashedArrow);
+          canvas.setActiveObject(groupDashedArrow);
+          break;
+        }
+
+        case "paren-left": {
+          const height = 80;
+          const width = 30;
+          const parenLeft = new Path(
+            `M ${pointer.x + width} ${pointer.y} Q ${pointer.x} ${pointer.y + height/2} ${pointer.x + width} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(parenLeft);
+          canvas.setActiveObject(parenLeft);
+          break;
+        }
+
+        case "paren-right": {
+          const height = 80;
+          const width = 30;
+          const parenRight = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + width} ${pointer.y + height/2} ${pointer.x} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(parenRight);
+          canvas.setActiveObject(parenRight);
+          break;
+        }
+
+        case "paren-top": {
+          const width = 80;
+          const height = 30;
+          const parenTop = new Path(
+            `M ${pointer.x} ${pointer.y + height} Q ${pointer.x + width/2} ${pointer.y} ${pointer.x + width} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(parenTop);
+          canvas.setActiveObject(parenTop);
+          break;
+        }
+
+        case "paren-bottom": {
+          const width = 80;
+          const height = 30;
+          const parenBottom = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + width/2} ${pointer.y + height} ${pointer.x + width} ${pointer.y}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(parenBottom);
+          canvas.setActiveObject(parenBottom);
+          break;
+        }
+
+        case "bracket-left": {
+          const height = 80;
+          const width = 20;
+          const bracketLeft = new Path(
+            `M ${pointer.x + width} ${pointer.y} L ${pointer.x} ${pointer.y} L ${pointer.x} ${pointer.y + height} L ${pointer.x + width} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(bracketLeft);
+          canvas.setActiveObject(bracketLeft);
+          break;
+        }
+
+        case "bracket-right": {
+          const height = 80;
+          const width = 20;
+          const bracketRight = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x + width} ${pointer.y} L ${pointer.x + width} ${pointer.y + height} L ${pointer.x} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(bracketRight);
+          canvas.setActiveObject(bracketRight);
+          break;
+        }
+
+        case "bracket-top": {
+          const width = 80;
+          const height = 20;
+          const bracketTop = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x + width} ${pointer.y} M ${pointer.x + width/2} ${pointer.y} L ${pointer.x + width/2} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(bracketTop);
+          canvas.setActiveObject(bracketTop);
+          break;
+        }
+
+        case "bracket-bottom": {
+          const width = 80;
+          const height = 20;
+          const bracketBottom = new Path(
+            `M ${pointer.x + width/2} ${pointer.y} L ${pointer.x + width/2} ${pointer.y + height} M ${pointer.x} ${pointer.y + height} L ${pointer.x + width} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          canvas.add(bracketBottom);
+          canvas.setActiveObject(bracketBottom);
+          break;
+        }
+
+        case "paren-left-arrow": {
+          const height = 80;
+          const width = 30;
+          const parenLeftArrow = new Path(
+            `M ${pointer.x + width} ${pointer.y} Q ${pointer.x} ${pointer.y + height/2} ${pointer.x + width} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          
+          const arrowSize = 8;
+          const arrowAngle = Math.PI / 4;
+          const arrow = new Path(
+            `M ${pointer.x + width} ${pointer.y + height} L ${pointer.x + width - arrowSize * Math.cos(arrowAngle)} ${pointer.y + height - arrowSize * Math.sin(arrowAngle)} M ${pointer.x + width} ${pointer.y + height} L ${pointer.x + width + arrowSize * Math.cos(arrowAngle)} ${pointer.y + height - arrowSize * Math.sin(arrowAngle)}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: false,
+            }
+          );
+          
+          const group = new Group([parenLeftArrow, arrow], {
+            selectable: true,
+          });
+          canvas.add(group);
+          canvas.setActiveObject(group);
+          break;
+        }
+
+        case "paren-right-arrow": {
+          const height = 80;
+          const width = 30;
+          const parenRightArrow = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + width} ${pointer.y + height/2} ${pointer.x} ${pointer.y + height}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: true,
+              strokeUniform: true,
+            }
+          );
+          
+          const arrowSize = 8;
+          const arrowAngle = Math.PI / 4;
+          const arrow = new Path(
+            `M ${pointer.x} ${pointer.y + height} L ${pointer.x - arrowSize * Math.cos(arrowAngle)} ${pointer.y + height - arrowSize * Math.sin(arrowAngle)} M ${pointer.x} ${pointer.y + height} L ${pointer.x + arrowSize * Math.cos(arrowAngle)} ${pointer.y + height - arrowSize * Math.sin(arrowAngle)}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              selectable: false,
+            }
+          );
+          
+          const group = new Group([parenRightArrow, arrow], {
+            selectable: true,
+          });
+          canvas.add(group);
+          canvas.setActiveObject(group);
+          break;
+        }
+
+        case "curved-arrow-right": {
+          const curvedPathRight = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + 50} ${pointer.y - 40} ${pointer.x + 100} ${pointer.y}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const curvedArrowHeadRight = new Polygon([
+            { x: pointer.x + 100, y: pointer.y },
+            { x: pointer.x + 90, y: pointer.y - 6 },
+            { x: pointer.x + 90, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const curvedGroupRight = new Group([curvedPathRight, curvedArrowHeadRight], {
+            selectable: true,
+          });
+          canvas.add(curvedGroupRight);
+          canvas.setActiveObject(curvedGroupRight);
+          break;
+        }
+
+        case "curved-arrow-left": {
+          const curvedPathLeft = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + 50} ${pointer.y + 40} ${pointer.x + 100} ${pointer.y}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const curvedArrowHeadLeft = new Polygon([
+            { x: pointer.x + 100, y: pointer.y },
+            { x: pointer.x + 90, y: pointer.y - 6 },
+            { x: pointer.x + 90, y: pointer.y + 6 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const curvedGroupLeft = new Group([curvedPathLeft, curvedArrowHeadLeft], {
+            selectable: true,
+          });
+          canvas.add(curvedGroupLeft);
+          canvas.setActiveObject(curvedGroupLeft);
+          break;
+        }
+
+        case "curved-arrow-up": {
+          const curvedPathUp = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + 40} ${pointer.y - 50} ${pointer.x} ${pointer.y - 100}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const curvedArrowHeadUp = new Polygon([
+            { x: pointer.x, y: pointer.y - 100 },
+            { x: pointer.x - 6, y: pointer.y - 90 },
+            { x: pointer.x + 6, y: pointer.y - 90 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const curvedGroupUp = new Group([curvedPathUp, curvedArrowHeadUp], {
+            selectable: true,
+          });
+          canvas.add(curvedGroupUp);
+          canvas.setActiveObject(curvedGroupUp);
+          break;
+        }
+
+        case "curved-arrow-down": {
+          const curvedPathDown = new Path(
+            `M ${pointer.x} ${pointer.y} Q ${pointer.x + 40} ${pointer.y + 50} ${pointer.x} ${pointer.y + 100}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const curvedArrowHeadDown = new Polygon([
+            { x: pointer.x, y: pointer.y + 100 },
+            { x: pointer.x - 6, y: pointer.y + 90 },
+            { x: pointer.x + 6, y: pointer.y + 90 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const curvedGroupDown = new Group([curvedPathDown, curvedArrowHeadDown], {
+            selectable: true,
+          });
+          canvas.add(curvedGroupDown);
+          canvas.setActiveObject(curvedGroupDown);
+          break;
+        }
+
+        case "elbow-connector-right": {
+          const elbowPathRight = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x + 50} ${pointer.y} L ${pointer.x + 50} ${pointer.y + 50} L ${pointer.x + 100} ${pointer.y + 50}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const elbowArrowRight = new Polygon([
+            { x: pointer.x + 100, y: pointer.y + 50 },
+            { x: pointer.x + 90, y: pointer.y + 44 },
+            { x: pointer.x + 90, y: pointer.y + 56 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const elbowGroupRight = new Group([elbowPathRight, elbowArrowRight], {
+            selectable: true,
+          });
+          canvas.add(elbowGroupRight);
+          canvas.setActiveObject(elbowGroupRight);
+          break;
+        }
+
+        case "elbow-connector-left": {
+          const elbowPathLeft = new Path(
+            `M ${pointer.x + 100} ${pointer.y} L ${pointer.x + 50} ${pointer.y} L ${pointer.x + 50} ${pointer.y + 50} L ${pointer.x} ${pointer.y + 50}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const elbowArrowLeft = new Polygon([
+            { x: pointer.x, y: pointer.y + 50 },
+            { x: pointer.x + 10, y: pointer.y + 44 },
+            { x: pointer.x + 10, y: pointer.y + 56 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const elbowGroupLeft = new Group([elbowPathLeft, elbowArrowLeft], {
+            selectable: true,
+          });
+          canvas.add(elbowGroupLeft);
+          canvas.setActiveObject(elbowGroupLeft);
+          break;
+        }
+
+        case "elbow-connector-up": {
+          const elbowPathUp = new Path(
+            `M ${pointer.x} ${pointer.y + 100} L ${pointer.x} ${pointer.y + 50} L ${pointer.x + 50} ${pointer.y + 50} L ${pointer.x + 50} ${pointer.y}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const elbowArrowUp = new Polygon([
+            { x: pointer.x + 50, y: pointer.y },
+            { x: pointer.x + 44, y: pointer.y + 10 },
+            { x: pointer.x + 56, y: pointer.y + 10 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const elbowGroupUp = new Group([elbowPathUp, elbowArrowUp], {
+            selectable: true,
+          });
+          canvas.add(elbowGroupUp);
+          canvas.setActiveObject(elbowGroupUp);
+          break;
+        }
+
+        case "elbow-connector-down": {
+          const elbowPathDown = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x} ${pointer.y + 50} L ${pointer.x + 50} ${pointer.y + 50} L ${pointer.x + 50} ${pointer.y + 100}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const elbowArrowDown = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 100 },
+            { x: pointer.x + 44, y: pointer.y + 90 },
+            { x: pointer.x + 56, y: pointer.y + 90 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const elbowGroupDown = new Group([elbowPathDown, elbowArrowDown], {
+            selectable: true,
+          });
+          canvas.add(elbowGroupDown);
+          canvas.setActiveObject(elbowGroupDown);
+          break;
+        }
+
+        case "y-split-right-curved": {
+          const ySplitPath = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x} ${pointer.y + 40} M ${pointer.x} ${pointer.y + 40} Q ${pointer.x + 20} ${pointer.y + 50} ${pointer.x + 60} ${pointer.y + 30} M ${pointer.x} ${pointer.y + 40} Q ${pointer.x + 20} ${pointer.y + 50} ${pointer.x + 60} ${pointer.y + 70}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x + 60, y: pointer.y + 30 },
+            { x: pointer.x + 50, y: pointer.y + 27 },
+            { x: pointer.x + 50, y: pointer.y + 33 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x + 60, y: pointer.y + 70 },
+            { x: pointer.x + 50, y: pointer.y + 67 },
+            { x: pointer.x + 50, y: pointer.y + 73 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const ySplitGroup = new Group([ySplitPath, arrowHead1, arrowHead2], {
+            selectable: true,
+          });
+          canvas.add(ySplitGroup);
+          canvas.setActiveObject(ySplitGroup);
+          break;
+        }
+
+        case "y-split-left-curved": {
+          const ySplitPath = new Path(
+            `M ${pointer.x + 60} ${pointer.y} L ${pointer.x + 60} ${pointer.y + 40} M ${pointer.x + 60} ${pointer.y + 40} Q ${pointer.x + 40} ${pointer.y + 50} ${pointer.x} ${pointer.y + 30} M ${pointer.x + 60} ${pointer.y + 40} Q ${pointer.x + 40} ${pointer.y + 50} ${pointer.x} ${pointer.y + 70}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x, y: pointer.y + 30 },
+            { x: pointer.x + 10, y: pointer.y + 27 },
+            { x: pointer.x + 10, y: pointer.y + 33 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x, y: pointer.y + 70 },
+            { x: pointer.x + 10, y: pointer.y + 67 },
+            { x: pointer.x + 10, y: pointer.y + 73 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const ySplitGroup = new Group([ySplitPath, arrowHead1, arrowHead2], {
+            selectable: true,
+          });
+          canvas.add(ySplitGroup);
+          canvas.setActiveObject(ySplitGroup);
+          break;
+        }
+
+        case "y-split-down-curved": {
+          const ySplitPath = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x + 50} ${pointer.y} M ${pointer.x + 50} ${pointer.y} Q ${pointer.x + 60} ${pointer.y + 20} ${pointer.x + 30} ${pointer.y + 60} M ${pointer.x + 50} ${pointer.y} Q ${pointer.x + 60} ${pointer.y + 20} ${pointer.x + 80} ${pointer.y + 60}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x + 30, y: pointer.y + 60 },
+            { x: pointer.x + 27, y: pointer.y + 50 },
+            { x: pointer.x + 33, y: pointer.y + 50 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x + 80, y: pointer.y + 60 },
+            { x: pointer.x + 77, y: pointer.y + 50 },
+            { x: pointer.x + 83, y: pointer.y + 50 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const ySplitGroup = new Group([ySplitPath, arrowHead1, arrowHead2], {
+            selectable: true,
+          });
+          canvas.add(ySplitGroup);
+          canvas.setActiveObject(ySplitGroup);
+          break;
+        }
+
+        case "t-split-right-elbow": {
+          const tSplitPath = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x} ${pointer.y + 80} M ${pointer.x} ${pointer.y + 20} L ${pointer.x + 60} ${pointer.y + 20} M ${pointer.x} ${pointer.y + 60} L ${pointer.x + 60} ${pointer.y + 60}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x + 60, y: pointer.y + 20 },
+            { x: pointer.x + 50, y: pointer.y + 14 },
+            { x: pointer.x + 50, y: pointer.y + 26 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x + 60, y: pointer.y + 60 },
+            { x: pointer.x + 50, y: pointer.y + 54 },
+            { x: pointer.x + 50, y: pointer.y + 66 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const tSplitGroup = new Group([tSplitPath, arrowHead1, arrowHead2], {
+            selectable: true,
+          });
+          canvas.add(tSplitGroup);
+          canvas.setActiveObject(tSplitGroup);
+          break;
+        }
+
+        case "t-split-left-elbow": {
+          const tSplitPath = new Path(
+            `M ${pointer.x + 60} ${pointer.y} L ${pointer.x + 60} ${pointer.y + 80} M ${pointer.x + 60} ${pointer.y + 20} L ${pointer.x} ${pointer.y + 20} M ${pointer.x + 60} ${pointer.y + 60} L ${pointer.x} ${pointer.y + 60}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x, y: pointer.y + 20 },
+            { x: pointer.x + 10, y: pointer.y + 14 },
+            { x: pointer.x + 10, y: pointer.y + 26 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x, y: pointer.y + 60 },
+            { x: pointer.x + 10, y: pointer.y + 54 },
+            { x: pointer.x + 10, y: pointer.y + 66 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const tSplitGroup = new Group([tSplitPath, arrowHead1, arrowHead2], {
+            selectable: true,
+          });
+          canvas.add(tSplitGroup);
+          canvas.setActiveObject(tSplitGroup);
+          break;
+        }
+
+        case "t-split-down-elbow": {
+          const tSplitPath = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x + 80} ${pointer.y} M ${pointer.x + 20} ${pointer.y} L ${pointer.x + 20} ${pointer.y + 60} M ${pointer.x + 60} ${pointer.y} L ${pointer.x + 60} ${pointer.y + 60}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x + 20, y: pointer.y + 60 },
+            { x: pointer.x + 14, y: pointer.y + 50 },
+            { x: pointer.x + 26, y: pointer.y + 50 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x + 60, y: pointer.y + 60 },
+            { x: pointer.x + 54, y: pointer.y + 50 },
+            { x: pointer.x + 66, y: pointer.y + 50 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const tSplitGroup = new Group([tSplitPath, arrowHead1, arrowHead2], {
+            selectable: true,
+          });
+          canvas.add(tSplitGroup);
+          canvas.setActiveObject(tSplitGroup);
+          break;
+        }
+
+        case "3-way-split-curved": {
+          const threeSplitPath = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x} ${pointer.y + 40} M ${pointer.x} ${pointer.y + 40} Q ${pointer.x + 10} ${pointer.y + 50} ${pointer.x + 50} ${pointer.y + 40} M ${pointer.x} ${pointer.y + 40} L ${pointer.x + 50} ${pointer.y + 80} M ${pointer.x} ${pointer.y + 40} Q ${pointer.x + 10} ${pointer.y + 50} ${pointer.x + 50} ${pointer.y + 120}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 40 },
+            { x: pointer.x + 40, y: pointer.y + 38 },
+            { x: pointer.x + 40, y: pointer.y + 42 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 80 },
+            { x: pointer.x + 44, y: pointer.y + 70 },
+            { x: pointer.x + 56, y: pointer.y + 70 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead3 = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 120 },
+            { x: pointer.x + 40, y: pointer.y + 118 },
+            { x: pointer.x + 40, y: pointer.y + 122 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const threeSplitGroup = new Group([threeSplitPath, arrowHead1, arrowHead2, arrowHead3], {
+            selectable: true,
+          });
+          canvas.add(threeSplitGroup);
+          canvas.setActiveObject(threeSplitGroup);
+          break;
+        }
+
+        case "3-way-split-elbow": {
+          const threeSplitPath = new Path(
+            `M ${pointer.x} ${pointer.y} L ${pointer.x} ${pointer.y + 40} M ${pointer.x} ${pointer.y + 40} L ${pointer.x + 50} ${pointer.y + 40} M ${pointer.x} ${pointer.y + 40} L ${pointer.x + 50} ${pointer.y + 80} M ${pointer.x} ${pointer.y + 40} L ${pointer.x + 50} ${pointer.y + 120}`,
+            {
+              stroke: "#000000",
+              strokeWidth: 2,
+              fill: null,
+              strokeUniform: true,
+            }
+          );
+          const arrowHead1 = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 40 },
+            { x: pointer.x + 40, y: pointer.y + 34 },
+            { x: pointer.x + 40, y: pointer.y + 46 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead2 = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 80 },
+            { x: pointer.x + 44, y: pointer.y + 70 },
+            { x: pointer.x + 56, y: pointer.y + 70 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const arrowHead3 = new Polygon([
+            { x: pointer.x + 50, y: pointer.y + 120 },
+            { x: pointer.x + 44, y: pointer.y + 110 },
+            { x: pointer.x + 56, y: pointer.y + 110 },
+          ], {
+            fill: "#000000",
+            stroke: "#000000",
+            strokeWidth: 0,
+          });
+          const threeSplitGroup = new Group([threeSplitPath, arrowHead1, arrowHead2, arrowHead3], {
+            selectable: true,
+          });
+          canvas.add(threeSplitGroup);
+          canvas.setActiveObject(threeSplitGroup);
+          break;
+        }
+
+        default:
+          // For any unhandled shapes, create a basic rectangle as fallback
+          const defaultShape = new Rect({
+            left: pointer.x - 40,
+            top: pointer.y - 40,
+            width: 80,
+            height: 80,
+            fill: "#3b82f6",
+            stroke: "#000000",
+            strokeWidth: 2,
+          });
+          canvas.add(defaultShape);
+          canvas.setActiveObject(defaultShape);
+        break;
+    }
+
+    canvas.requestRenderAll();
+    if (onShapeCreated) onShapeCreated();
+
+    // Save state for undo/redo after shape creation
+    saveState();
+    };
+
+    // Double-click handler to edit text inside labeled shape groups
+    const handleDblClick = (e: any) => {
+      const target = e.target as any;
+      if (!target) return;
+      if (target.type === 'group') {
+        const textObj = target.getObjects().find((o: any) => o.type === 'textbox');
+        if (textObj) {
+          canvas.setActiveObject(textObj);
+          if ((textObj as any).enterEditing) {
+            (textObj as any).enterEditing();
+            (textObj as any).selectAll?.();
+          }
+          canvas.requestRenderAll();
+        }
+      } else if (target.type === 'textbox') {
+        (target as any).enterEditing?.();
+        canvas.requestRenderAll();
+      }
+    };
+
+    // Improve hit testing for nested objects
+    (canvas as any).targetFindTolerance = 8;
+    (canvas as any).subTargetCheck = true;
+
+    // Detach previous handlers
+    canvas.off("mouse:down", handleCanvasClick);
+    canvas.off("mouse:dblclick", handleDblClick);
+    
+    // Attach handlers
+    if (activeTool !== "select" && activeTool !== "freeform-line" && activeTool !== "pen" && activeTool !== "custom-polygon") {
+      canvas.on("mouse:down", handleCanvasClick);
+    }
+    canvas.on("mouse:dblclick", handleDblClick);
+
+    return () => {
+      canvas.off("mouse:down", handleCanvasClick);
+      canvas.off("mouse:dblclick", handleDblClick);
+    };
+  }, [canvas, activeTool, textFont, textAlign, textUnderline, textOverline, textBold, textItalic, connectorState.isDrawing, connectorState.startX, connectorState.startY]);
+
+  // Visual feedback for active tool mode
+  const isToolActive = activeTool && activeTool !== 'select';
+  const toolModeClass = isToolActive 
+    ? 'shadow-[0_0_0_2px_hsl(var(--primary)/0.5)] rounded-sm' 
+    : '';
+
+  return (
+    <div
+      className="inline-block"
+      data-testid={CanvasEditorTestIds.CANVAS_WRAPPER}
+    >
+      <div className={`shadow-2xl bg-white transition-shadow duration-200 ${toolModeClass}`} style={{ boxShadow: '0 0 20px rgba(0,0,0,0.1)', willChange: 'box-shadow' }}>
+        <div
+          style={{
+            width: `${(canvasDimensions.width || 1200) * (zoom / 100)}px`,
+            height: `${(canvasDimensions.height || 800) * (zoom / 100)}px`,
+            position: 'relative',
+            display: 'inline-block',
+            overflow: 'hidden',
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            data-testid={CanvasEditorTestIds.CANVAS_ELEMENT}
+            style={{
+              transform: `scale(${zoom / 100})`,
+              transformOrigin: 'top left',
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+};

@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /auth
+Disallow: /projects
+Disallow: /profile
+Disallow: /analytics
+Disallow: /my-submissions
+Disallow: /email-notifications
+Disallow: /canvas
+
+Sitemap: https://biosketch.art/sitemap.xml

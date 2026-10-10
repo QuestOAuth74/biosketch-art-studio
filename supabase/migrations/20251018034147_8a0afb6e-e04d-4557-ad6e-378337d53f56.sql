@@ -1,0 +1,2 @@
+-- Admin role assignment is handled by the seed script (scripts/seed.ts)
+-- This migration is intentionally empty as the original seed data was removed

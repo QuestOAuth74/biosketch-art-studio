@@ -1,0 +1,587 @@
+{
+  "title": "Anticoagulants — High-Yield Notes (Board Review)",
+  "background_color": "#EAF2F8",
+  "citation": "Citations: DOI 10.1056/NEJMra2400000 | DOI 10.1161/AHA.120.017520 | Sources: https://pubmed.ncbi.nlm.nih.gov/42209153/",
+  "panels": [
+    {
+      "id": "core_concept",
+      "title": "Core Concept",
+      "x": 20,
+      "y": 58,
+      "width": 560,
+      "height": 155,
+      "background_color": "#FDFEFE",
+      "header_color": "#2980B9",
+      "content": [
+        {
+          "type": "image",
+          "path": "/home/ubuntu/skills/scientific-infographics/templates/icon_blood_vessel.png",
+          "x": 8,
+          "y": 34,
+          "width": 230,
+          "height": 108
+        },
+        {
+          "type": "text",
+          "text": "Anticoagulants inhibit fibrin formation (Inhibit Fibrin Formation).",
+          "x": 252,
+          "y": 36,
+          "font_size": 13,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 298
+        },
+        {
+          "type": "text",
+          "text": "- Prevent thrombosis by inhibiting coagulation cascade\n- Used mainly for DVT, PE, AF stroke prevention",
+          "x": 252,
+          "y": 72,
+          "font_size": 12,
+          "color": "#2C3E50",
+          "max_width": 298
+        }
+      ]
+    },
+    {
+      "id": "major_classes",
+      "title": "Major Classes",
+      "x": 20,
+      "y": 226,
+      "width": 560,
+      "height": 100,
+      "background_color": "#FDFEFE",
+      "header_color": "#2980B9",
+      "content": [
+        {
+          "type": "text",
+          "text": "1. Vitamin K antagonists (Warfarin)",
+          "x": 10,
+          "y": 36,
+          "font_size": 13,
+          "color": "#2C3E50",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "4. Direct oral anticoagulants (DOACs)",
+          "x": 285,
+          "y": 36,
+          "font_size": 13,
+          "color": "#2C3E50",
+          "max_width": 265
+        },
+        {
+          "type": "text",
+          "text": "2. Heparins (UFH, LMWH)",
+          "x": 10,
+          "y": 58,
+          "font_size": 13,
+          "color": "#2C3E50",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "   - Xa inhibitors: apixaban, rivaroxaban",
+          "x": 285,
+          "y": 58,
+          "font_size": 12,
+          "color": "#5D6D7E",
+          "max_width": 265
+        },
+        {
+          "type": "text",
+          "text": "3. Indirect Xa inhibitor (Fondaparinux)",
+          "x": 10,
+          "y": 78,
+          "font_size": 13,
+          "color": "#2C3E50",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "   - Thrombin inhibitor: dabigatran",
+          "x": 285,
+          "y": 78,
+          "font_size": 12,
+          "color": "#5D6D7E",
+          "max_width": 265
+        }
+      ]
+    },
+    {
+      "id": "warfarin",
+      "title": "1. Warfarin (VKA)",
+      "x": 20,
+      "y": 338,
+      "width": 275,
+      "height": 315,
+      "background_color": "#FDFEFE",
+      "header_color": "#1A5276",
+      "content": [
+        {
+          "type": "image",
+          "path": "/home/ubuntu/skills/scientific-infographics/templates/icon_liver.png",
+          "x": 8,
+          "y": 34,
+          "width": 75,
+          "height": 75
+        },
+        {
+          "type": "text",
+          "text": "Mechanism",
+          "x": 92,
+          "y": 36,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 175
+        },
+        {
+          "type": "text",
+          "text": "Inhibits VKOR → ↓ synthesis of Factors II, VII, IX, X + Protein C/S",
+          "x": 92,
+          "y": 54,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 175
+        },
+        {
+          "type": "text",
+          "text": "Key Points",
+          "x": 8,
+          "y": 118,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "- Delayed onset (days) → requires heparin bridge\n- Initial hypercoagulable state (↓ protein C first)",
+          "x": 8,
+          "y": 136,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "Monitoring",
+          "x": 8,
+          "y": 180,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "- PT/INR (target ≈2–3)",
+          "x": 8,
+          "y": 198,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "Reversal",
+          "x": 8,
+          "y": 218,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "- Vitamin K (slow)\n- PCC (fast) ± FFP",
+          "x": 8,
+          "y": 236,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "Adverse Effects (HIGH-YIELD)",
+          "x": 8,
+          "y": 268,
+          "font_size": 12,
+          "bold": true,
+          "color": "#C0392B",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "- Skin necrosis (early)\n- Teratogenic\n- Bleeding",
+          "x": 8,
+          "y": 286,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        }
+      ]
+    },
+    {
+      "id": "heparins",
+      "title": "2. Heparins",
+      "x": 305,
+      "y": 338,
+      "width": 275,
+      "height": 315,
+      "background_color": "#FDFEFE",
+      "header_color": "#1A5276",
+      "content": [
+        {
+          "type": "text",
+          "text": "Mechanism",
+          "x": 8,
+          "y": 36,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "Activates Antithrombin III (ATIII) → inhibits Xa and IIa (Thrombin)",
+          "x": 8,
+          "y": 54,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "UFH (Unfractionated Heparin)",
+          "x": 8,
+          "y": 92,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "- IV, rapid onset/offset\n- Monitor: aPTT\n- Reversal: protamine sulfate",
+          "x": 8,
+          "y": 110,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "LMWH (e.g., enoxaparin)",
+          "x": 8,
+          "y": 162,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "- Mainly Xa inhibition\n- SC, predictable\n- Minimal monitoring\n- Renally cleared",
+          "x": 8,
+          "y": 180,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "Adverse Effects (HIGH-YIELD)",
+          "x": 8,
+          "y": 240,
+          "font_size": 12,
+          "bold": true,
+          "color": "#C0392B",
+          "max_width": 255
+        },
+        {
+          "type": "text",
+          "text": "HIT (VERY HIGH YIELD)\n- ↓ platelets + paradoxical thrombosis\n- Osteoporosis (long-term)",
+          "x": 8,
+          "y": 258,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 255
+        }
+      ]
+    },
+    {
+      "id": "fondaparinux",
+      "title": "3. Fondaparinux",
+      "x": 600,
+      "y": 58,
+      "width": 285,
+      "height": 190,
+      "background_color": "#FDFEFE",
+      "header_color": "#1E8449",
+      "content": [
+        {
+          "type": "text",
+          "text": "Mechanism",
+          "x": 8,
+          "y": 36,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 265
+        },
+        {
+          "type": "text",
+          "text": "Fondaparinux → ATIII → inhibits Xa",
+          "x": 8,
+          "y": 54,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 265
+        },
+        {
+          "type": "text",
+          "text": "Key Features",
+          "x": 8,
+          "y": 90,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 265
+        },
+        {
+          "type": "text",
+          "text": "- Indirect Xa inhibitor (via antithrombin)\n- No HIT risk\n- Minimal monitoring (anti-Xa if needed)\n- Renally cleared\n- No specific reversal agent",
+          "x": 8,
+          "y": 108,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 265
+        }
+      ]
+    },
+    {
+      "id": "doacs",
+      "title": "4. Direct Oral Anticoagulants (DOACs)",
+      "x": 900,
+      "y": 58,
+      "width": 280,
+      "height": 295,
+      "background_color": "#FDFEFE",
+      "header_color": "#6C3483",
+      "content": [
+        {
+          "type": "text",
+          "text": "Classes",
+          "x": 8,
+          "y": 36,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "- Xa Inhibitors: apixaban, rivaroxaban (-xaban)\n- Thrombin inhibitor: dabigatran",
+          "x": 8,
+          "y": 54,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "Advantages",
+          "x": 8,
+          "y": 90,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "- Oral, rapid onset\n- No routine monitoring\n- Fewer interactions",
+          "x": 8,
+          "y": 108,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "Limitations",
+          "x": 8,
+          "y": 150,
+          "font_size": 12,
+          "bold": true,
+          "color": "#C0392B",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "- Renal dosing\n- Not for: Mechanical valves\n- Antiphospholipid syndrome",
+          "x": 8,
+          "y": 168,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "Reversal (VERY TESTABLE)",
+          "x": 8,
+          "y": 210,
+          "font_size": 12,
+          "bold": true,
+          "color": "#1A252F",
+          "max_width": 260
+        },
+        {
+          "type": "text",
+          "text": "- Dabigatran → idarucizumab\n- Xa inhibitors → andexanet alfa\n- PCC if unavailable",
+          "x": 8,
+          "y": 228,
+          "font_size": 11,
+          "color": "#2C3E50",
+          "max_width": 260
+        }
+      ]
+    },
+    {
+      "id": "key_comparisons",
+      "title": "Key Comparisons",
+      "x": 600,
+      "y": 260,
+      "width": 580,
+      "height": 135,
+      "background_color": "#FDFEFE",
+      "header_color": "#2980B9",
+      "content": [
+        {
+          "type": "table",
+          "x": 8,
+          "y": 34,
+          "headers": ["Drug", "Monitoring", "Reversal", "Pregnancy"],
+          "rows": [
+            ["Warfarin", "INR", "Vit K + PCC", "X"],
+            ["UFH", "aPTT", "Protamine", "OK"],
+            ["LMWH", "Minimal", "Partial protamine", "OK"],
+            ["DOACs", "None", "Specific agents", "X"]
+          ],
+          "col_widths": [95, 105, 200, 95],
+          "row_height": 22,
+          "header_bg": "#D6EAF8",
+          "alt_row_bg": "#EBF5FB"
+        }
+      ]
+    },
+    {
+      "id": "exam_pearls",
+      "title": "Exam Pearls",
+      "x": 600,
+      "y": 406,
+      "width": 580,
+      "height": 120,
+      "background_color": "#EBF5FB",
+      "header_color": "#117A65",
+      "content": [
+        {
+          "type": "text",
+          "text": "Warfarin → bridge with heparin",
+          "x": 8,
+          "y": 36,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 280
+        },
+        {
+          "type": "text",
+          "text": "Protamine reverses heparin",
+          "x": 298,
+          "y": 36,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 275
+        },
+        {
+          "type": "text",
+          "text": "HIT = thrombosis + thrombocytopenia",
+          "x": 8,
+          "y": 54,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 280
+        },
+        {
+          "type": "text",
+          "text": "Idarucizumab = dabigatran antidote",
+          "x": 298,
+          "y": 54,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 275
+        },
+        {
+          "type": "text",
+          "text": "DOACs = no monitoring",
+          "x": 8,
+          "y": 72,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 280
+        },
+        {
+          "type": "text",
+          "text": "Andexanet = Xa inhibitor antidote",
+          "x": 298,
+          "y": 72,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 275
+        },
+        {
+          "type": "text",
+          "text": "Protamine reverses heparin",
+          "x": 8,
+          "y": 90,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 280
+        },
+        {
+          "type": "text",
+          "text": "Heparin safe in pregnancy",
+          "x": 298,
+          "y": 90,
+          "font_size": 11,
+          "color": "#1A5276",
+          "max_width": 275
+        }
+      ]
+    },
+    {
+      "id": "one_liner",
+      "title": "One-Liner",
+      "x": 600,
+      "y": 537,
+      "width": 580,
+      "height": 100,
+      "background_color": "#EBF5FB",
+      "header_color": "#117A65",
+      "content": [
+        {
+          "type": "text",
+          "text": "\"Anticoagulants inhibit fibrin formation — warfarin affects synthesis, heparin enhances antithrombin, DOACs directly block Xa or thrombin.\"",
+          "x": 8,
+          "y": 36,
+          "font_size": 13,
+          "bold": true,
+          "color": "#1A5276",
+          "max_width": 562
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+Science Canvas Creator - Image Storage Optimization
+Date: 15 February 2026
+Price: $395 USD
+Timeline: 3-4 days
+
+
+Overview
+
+Images added to the canvas currently embed their full content (base64 or SVG data) directly into the project save file, consuming up to 650 KB per image against a 4 MB limit. This milestone applies the same reference-based approach already used for library icons - storing only an asset ID and transforms in the project data, then fetching the actual image from storage on load.
+
+Note: this optimization applies to newly added images. Previously embedded images in existing projects will not be updated unless the scope is expanded.
+
+
+Deliverables
+
+Reference-based image storage: images store an asset ID instead of embedded content. Projects reconstruct images from storage on load. The image tool shows a loading placeholder while uploading, then replaces it with the uploaded image.
+
+Images deleted from the canvas remain available in the Assets library. Images deleted from the Assets library prompt a confirmation warning that they will be removed from all projects using them.
+
+Full feature compatibility: cropping, filters, color maps, masking, opacity, blending modes, copy/paste, and undo/redo all work correctly with the new storage system. Original image data is preserved for non-destructive editing.
+
+Thumbnail generation: project thumbnails fetch and render user assets from storage, accurately reflecting canvas content.
+
+Storage quota management: 500 MB limit per user, with a usage indicator in the Assets tab. Uploads are blocked when the quota is exceeded, with a clear error message and real-time usage tracking.
+
+Vercel SPA routing fix: configuration update so that page refreshes and direct navigation to client-side routes return the app instead of a 404 error.
+
+
+Tests
+
+Unit tests cover save/load serialization (asset src stripped on save, data under 1 KB, all properties preserved) and storage quota logic (correct calculation across multiple assets, enforcement at the limit, updates after deletion).
+
+End-to-end tests cover the image tool upload flow (placeholder, upload, replacement, Assets tab appearance), Assets tab integration, asset-by-reference save/load for JPG/PNG/SVG with all properties preserved, missing asset handling (placeholder with warning), asset deletion behavior (canvas vs. library), and storage quota UX (indicator updates, blocked uploads with error message).
+
+Manual tests cover thumbnail generation with asset references and the storage quota exceeded experience.

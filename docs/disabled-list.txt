@@ -1,0 +1,22 @@
+ Here's the complete list of what was disabled:                                
+                                                                                
+  1. AlignmentGuides - Smart alignment guidelines (commented out in Canvas.tsx) 
+  2. SpacingGuides - Spacing indicators (commented out in Canvas.tsx)
+  3. Debounced auto-save - Early return in useEffect
+  4. Periodic auto-save - Early return in useEffect
+  5. Auto-recovery - Early return in useEffect
+  6. History manager - saveState() has early return at the top (disabled at
+  source)
+  7. History console logging - All console.log statements removed from
+  historyManager.ts
+
+  So even though saveState() is called throughout the code, it does nothing
+  because of the early return in the historyManager class itself.
+
+
+
+  Optimizations:
+  - Alignment and spacing guide lines were optimized to reduce the maximum number of guides rendering at once. The guide lines will only render when up to 50 icons are on the canvas.
+  - Save icon references (position, dimensions, styles etc.) and reapply those settings on load
+  - Rasterize membranes after each time styles are applied after each time edit mode is exited
+- Refactor history manage to store transformations rather than serialized object data. This is more complex to manage but more performant, rather than storing snapshots to later restore, it stores the steps taken to make changes and then reverses them

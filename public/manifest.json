@@ -1,0 +1,30 @@
+{
+  "name": "BioSketch - Scientific Illustration Tool",
+  "short_name": "BioSketch",
+  "description": "Create stunning scientific illustrations with BioSketch - a free drag-and-drop tool for scientists and researchers",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#1a1f2e",
+  "background_color": "#ffffff",
+  "orientation": "any",
+  "categories": ["education", "graphics", "productivity"],
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+- moving the line or curved line causes the anchor points to detach when next entering edit mode
+- dragging the anchor points in the straight line or curved line edit modes shows the guidelines and alignlines relative to the grid lines

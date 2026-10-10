@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LaTeX Equation Renderer - BioSketch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.40/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.40/dist/katex.min.js"></script>
+  <style>
+    :root {
+      --bs-primary: #2563eb;
+      --bs-primary-light: #eff6ff;
+      --bs-primary-dark: #1d4ed8;
+      --bs-bg: #f4f5f7;
+      --bs-surface: #ffffff;
+      --bs-border: #e2e8f0;
+      --bs-border-light: #f1f5f9;
+      --bs-text: #0f172a;
+      --bs-text-secondary: #475569;
+      --bs-text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bs-bg);
+      color: var(--bs-text);
+      -webkit-font-smoothing: antialiased;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── Top section: input ── */
+    .input-section {
+      background: var(--bs-surface);
+      border-bottom: 1px solid var(--bs-border);
+      padding: 16px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .latex-input {
+      flex: 1;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 14px;
+      padding: 10px 14px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px;
+      outline: none;
+      resize: vertical;
+      min-height: 48px;
+      max-height: 120px;
+      color: var(--bs-text);
+      background: var(--bs-surface);
+      transition: border-color 0.12s ease;
+    }
+
+    .latex-input:focus {
+      border-color: var(--bs-primary);
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.08);
+    }
+
+    .btn {
+      padding: 10px 16px;
+      border: 1px solid var(--bs-border);
+      border-radius: 8px;
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.12s ease;
+      background: var(--bs-surface);
+      color: var(--bs-text-secondary);
+      white-space: nowrap;
+    }
+
+    .btn:hover {
+      background: var(--bs-primary-light);
+      color: var(--bs-primary);
+      border-color: var(--bs-primary);
+    }
+
+    .btn-primary {
+      background: var(--bs-primary);
+      color: #fff;
+      border-color: var(--bs-primary);
+    }
+
+    .btn-primary:hover {
+      background: var(--bs-primary-dark);
+    }
+
+    /* ── Examples row ── */
+    .examples-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .examples-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--bs-text-muted);
+      margin-right: 6px;
+    }
+
+    .example-btn {
+      padding: 3px 8px;
+      background: var(--bs-border-light);
+      border: 1px solid transparent;
+      border-radius: 5px;
+      font-size: 10px;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.12s ease;
+      color: var(--bs-text-secondary);
+    }
+
+    .example-btn:hover {
+      background: var(--bs-primary-light);
+      border-color: var(--bs-primary);
+      color: var(--bs-primary);
+    }
+
+    /* ── Preview area ── */
+    .preview-area {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+      overflow: auto;
+    }
+
+    .preview-card {
+      background: var(--bs-surface);
+      border: 1px solid var(--bs-border);
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+      padding: 40px 60px;
+      min-width: 300px;
+      max-width: 90%;
+      text-align: center;
+    }
+
+    #preview .katex { font-size: 1.8em; }
+
+    .error-msg {
+      color: #dc2626;
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+      text-align: left;
+      padding: 12px;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+    }
+
+    .placeholder-text {
+      color: var(--bs-text-muted);
+      font-size: 14px;
+    }
+
+    /* ── Bottom bar ── */
+    .bottom-bar {
+      background: var(--bs-surface);
+      border-top: 1px solid var(--bs-border);
+      padding: 10px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .size-select {
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      padding: 5px 8px;
+      border: 1px solid var(--bs-border);
+      border-radius: 6px;
+      background: var(--bs-surface);
+      color: var(--bs-text-secondary);
+      outline: none;
+    }
+
+    .bottom-bar-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .bottom-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--bs-text-muted);
+    }
+
+    /* Attribution */
+    #attribution {
+      position: fixed; bottom: 4px; right: 8px;
+      font-size: 9px; color: var(--bs-text-muted); opacity: 0.5;
+    }
+    #attribution a { color: var(--bs-text-secondary); text-decoration: none; }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="main">
+    <!-- Input section -->
+    <div class="input-section">
+      <div class="input-row">
+        <textarea id="latexInput" class="latex-input" placeholder="Type LaTeX equation... e.g. E = mc^2" oninput="renderLive()">E = mc^2</textarea>
+      </div>
+      <div class="examples-row">
+        <span class="examples-label">Examples:</span>
+        <div id="examples"></div>
+      </div>
+    </div>
+
+    <!-- Preview -->
+    <div class="preview-area">
+      <div class="preview-card">
+        <div id="preview"></div>
+      </div>
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="bottom-bar">
+      <div class="bottom-bar-group">
+        <span class="bottom-label">Size:</span>
+        <select id="fontSize" class="size-select" onchange="renderLive()">
+          <option value="1.2">Small</option>
+          <option value="1.8" selected>Medium</option>
+          <option value="2.5">Large</option>
+          <option value="3.5">Extra Large</option>
+        </select>
+        <span class="bottom-label" style="margin-left:12px;">Mode:</span>
+        <select id="displayMode" class="size-select" onchange="renderLive()">
+          <option value="true" selected>Display</option>
+          <option value="false">Inline</option>
+        </select>
+      </div>
+      <div class="bottom-bar-group">
+        <button class="btn" onclick="exportAs('png')">Export PNG</button>
+        <button class="btn" onclick="exportAs('svg')">Export SVG</button>
+        <button class="btn" onclick="copyLatex()">Copy LaTeX</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="attribution">
+    <a href="https://biosketch.art" target="_blank">Biosketch.Art</a> — Powered by <a href="https://katex.org" target="_blank">KaTeX</a> (MIT)
+  </div>
+
+  <script>
+    var examples = [
+      { name: 'Quadratic', latex: 'x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}' },
+      { name: "Einstein", latex: 'E = mc^2' },
+      { name: 'Integral', latex: '\\int_{0}^{\\infty} e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}' },
+      { name: 'Euler', latex: 'e^{i\\pi} + 1 = 0' },
+      { name: 'Matrix', latex: '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}' },
+      { name: 'Sum', latex: '\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}' },
+      { name: 'Limit', latex: '\\lim_{x \\to 0} \\frac{\\sin x}{x} = 1' },
+      { name: 'Derivative', latex: '\\frac{d}{dx}\\left(x^n\\right) = nx^{n-1}' },
+      { name: 'Michaelis-Menten', latex: 'v = \\frac{V_{max}[S]}{K_m + [S]}' },
+      { name: 'Nernst', latex: 'E = E^0 - \\frac{RT}{nF}\\ln Q' },
+      { name: 'Henderson-Hasselbalch', latex: 'pH = pK_a + \\log\\frac{[A^-]}{[HA]}' },
+      { name: 'Boltzmann', latex: 'S = k_B \\ln \\Omega' },
+      { name: "Schrödinger", latex: 'i\\hbar\\frac{\\partial}{\\partial t}\\Psi = \\hat{H}\\Psi' },
+      { name: 'Binomial', latex: '\\binom{n}{k} = \\frac{n!}{k!(n-k)!}' },
+      { name: 'Greek', latex: '\\alpha, \\beta, \\gamma, \\delta, \\epsilon, \\theta, \\lambda, \\mu, \\sigma, \\omega' },
+    ];
+
+    var exDiv = document.getElementById('examples');
+    examples.forEach(function(ex) {
+      var btn = document.createElement('button');
+      btn.className = 'example-btn';
+      btn.textContent = ex.name;
+      btn.onclick = function() {
+        document.getElementById('latexInput').value = ex.latex;
+        renderLive();
+      };
+      exDiv.appendChild(btn);
+    });
+
+    function renderLive() {
+      var latex = document.getElementById('latexInput').value.trim();
+      var preview = document.getElementById('preview');
+      var fontSize = document.getElementById('fontSize').value;
+      var displayMode = document.getElementById('displayMode').value === 'true';
+
+      if (!latex) {
+        preview.innerHTML = '<span class="placeholder-text">Type a LaTeX equation above</span>';
+        return;
+      }
+
+      try {
+        katex.render(latex, preview, {
+          displayMode: displayMode,
+          throwOnError: true,
+          trust: true,
+          strict: false,
+        });
+        preview.querySelector('.katex').style.fontSize = fontSize + 'em';
+      } catch (err) {
+        preview.innerHTML = '<div class="error-msg">' + err.message + '</div>';
+      }
+    }
+
+    function exportAs(format) {
+      var preview = document.getElementById('preview');
+      var katexEl = preview.querySelector('.katex');
+      if (!katexEl) { alert('Render an equation first'); return; }
+
+      if (format === 'svg') {
+        // Get the rendered HTML and wrap in SVG via foreignObject
+        var html = katexEl.outerHTML;
+        var w = katexEl.offsetWidth + 40;
+        var h = katexEl.offsetHeight + 40;
+        var svgStr = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">' +
+          '<foreignObject width="100%" height="100%">' +
+          '<div xmlns="http://www.w3.org/1999/xhtml" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-family:KaTeX_Main,serif;">' +
+          '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.40/dist/katex.min.css"/>' +
+          html +
+          '</div></foreignObject></svg>';
+        var blob = new Blob([svgStr], { type: 'image/svg+xml' });
+        var a = document.createElement('a');
+        a.download = 'equation.svg';
+        a.href = URL.createObjectURL(blob);
+        a.click();
+        URL.revokeObjectURL(a.href);
+        return;
+      }
+
+      // PNG export via canvas
+      var scale = 3;
+      var canvas = document.createElement('canvas');
+      var w = katexEl.offsetWidth;
+      var h = katexEl.offsetHeight;
+      canvas.width = (w + 40) * scale;
+      canvas.height = (h + 40) * scale;
+
+      var svgData = '<svg xmlns="http://www.w3.org/2000/svg" width="' + (w + 40) + '" height="' + (h + 40) + '">' +
+        '<foreignObject width="100%" height="100%">' +
+        '<div xmlns="http://www.w3.org/1999/xhtml" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;background:white;font-family:KaTeX_Main,serif;">' +
+        '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.40/dist/katex.min.css"/>' +
+        katexEl.outerHTML +
+        '</div></foreignObject></svg>';
+
+      var img = new Image();
+      img.onload = function() {
+        var ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w + 40, h + 40);
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob(function(blob) {
+          var a = document.createElement('a');
+          a.download = 'equation.png';
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+      };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgData);
+    }
+
+    function copyLatex() {
+      var latex = document.getElementById('latexInput').value.trim();
+      if (!latex) return;
+      navigator.clipboard.writeText(latex).then(function() {
+        // Brief visual feedback
+        var btn = event.target;
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function() { btn.textContent = orig; }, 1500);
+      });
+    }
+
+    // Listen for parent messages
+    window.addEventListener('message', function(e) {
+      if (e.data && e.data.type === 'set-latex') {
+        document.getElementById('latexInput').value = e.data.latex;
+        renderLive();
+      }
+      if (e.data && e.data.type === 'get-svg-for-canvas') {
+        var preview = document.getElementById('preview');
+        // Use .katex-html only (skip .katex-mathml which is hidden MathML that can render as duplicate)
+        var katexEl = preview.querySelector('.katex-html') || preview.querySelector('.katex');
+        if (!katexEl) return;
+        // Use full content dimensions (scrollWidth/scrollHeight capture multiline overflow)
+        var scale = 3;
+        var pad = 40;
+        var w = Math.max(katexEl.offsetWidth, katexEl.scrollWidth, katexEl.getBoundingClientRect().width);
+        var h = Math.max(katexEl.offsetHeight, katexEl.scrollHeight, katexEl.getBoundingClientRect().height);
+        var totalW = Math.ceil(w) + pad;
+        var totalH = Math.ceil(h) + pad;
+        var canvasEl = document.createElement('canvas');
+        canvasEl.width = totalW * scale;
+        canvasEl.height = totalH * scale;
+        var svgData = '<svg xmlns="http://www.w3.org/2000/svg" width="' + totalW + '" height="' + totalH + '">' +
+          '<foreignObject width="' + totalW + '" height="' + totalH + '">' +
+          '<div xmlns="http://www.w3.org/1999/xhtml" style="display:flex;align-items:center;justify-content:center;width:' + totalW + 'px;height:' + totalH + 'px;background:white;font-family:KaTeX_Main,serif;">' +
+          '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.40/dist/katex.min.css"/>' +
+          katexEl.outerHTML +
+          '</div></foreignObject></svg>';
+        var img2 = new Image();
+        img2.onload = function() {
+          var ctx = canvasEl.getContext('2d');
+          ctx.scale(scale, scale);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, totalW, totalH);
+          ctx.drawImage(img2, 0, 0);
+          var dataUrl = canvasEl.toDataURL('image/png');
+          window.parent.postMessage({ type: 'latex-png-for-canvas', dataUrl: dataUrl, width: totalW, height: totalH }, '*');
+        };
+        img2.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgData);
+      }
+    });
+
+    // Render on load
+    renderLive();
+  </script>
+</body>
+</html>
