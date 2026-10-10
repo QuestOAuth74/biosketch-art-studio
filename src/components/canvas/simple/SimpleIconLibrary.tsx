@@ -146,7 +146,6 @@ export function SimpleIconLibrary({ onAIIconGenerate }: SimpleIconLibraryProps =
         onCategoryChange={setSelectedCategory}
         isCollapsed={false}
         onToggleCollapse={() => {}}
-        onAIIconGenerate={onAIIconGenerate}
       />
     </div>
   );
